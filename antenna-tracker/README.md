@@ -83,7 +83,8 @@ scan; high-speed transport carries raw counts. Rebuild/upload after editing.
 Firmware settings and browser scaling settings are independent.
 For temporary ADC diagnosis, choose a channel in **Temporary ADC diagnostic
 mode** and click **Apply ADC selection**. The board holds the multiplexer on
-that input, uses conservative 1 MHz SPI, flushes four conversions with 100 us
+that input, uses `ADC_DIAGNOSTIC_SPI_HZ` (the same clock as normal scanning by
+default), flushes four conversions with 100 us
 settling delays at selection changes, and reports only that channel. The UI
 shows raw counts and unscaled ADC input volts; other channels display OFF and
 are blank in full-rate CSV. Select **Normal · all channels** to restore normal
@@ -91,6 +92,11 @@ scanning. This ADC selection does not enable or command servos and is not
 persistent across board resets. Serial commands are `ADC CHANNEL 3` (0–15)
 and `ADC CHANNEL ALL`. Mode changes are applied by the sole ADC SPI task and
 confirmed through firmware telemetry.
+Both acquisition clocks and the CS-high recovery delay (`ADC_QUIET_US`) are
+configured in `src/sampling_config.h`. For a settling experiment, increase
+the delay from 1 to 2–5 microseconds or reduce both clocks. Rebuild/upload
+after edits. These changes can reduce the achieved reading rate. The reported
+ADC mode includes the actual configured SPI clock and recovery delay.
 Edit `src/sampling_config.h` for `ADC_SAMPLE_HZ` (10,000 Hz), `ADC_SPI_HZ`
 (16 MHz), and `TELEMETRY_HZ` (20 Hz). ADC timer configuration is applied at
 startup; changing `adcSampleHz` afterward does not retime it. The accepted ADC
