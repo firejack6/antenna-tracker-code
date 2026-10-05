@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Antenna tracker · Sensor dashboard</title>
+  <link rel="stylesheet" href="/style.css"><script src="/channel-scaling.js" defer></script><script src="/app.js" defer></script>
+</head>
+<body>
+<header><div><div class="eyebrow">ANTENNA TRACKER / TELEMETRY</div><h1>Sensor dashboard<span class="pulse">●</span></h1><p>ADS7953 · BMI323 · BMM350</p></div><div class="header-right"><span id="status" class="badge">Disconnected</span><div id="freshness">No samples received</div></div></header>
+<main>
+  <section class="panel connection" aria-label="Connection settings">
+    <form id="connection-form">
+      <label>Source<select id="mode"><option value="remote">PlatformIO remote</option><option value="direct">Direct USB serial</option><option value="demo">Demo · simulated data</option></select></label>
+      <label id="agent-field">Remote agent<input id="agent" value="desktop-o1gdd79" maxlength="200" required></label>
+      <label id="port-field">Serial port<input id="port" list="ports" placeholder="Find ports or enter COM port" maxlength="250"><datalist id="ports"></datalist></label>
+      <label id="baud-field">Baud rate<input id="baud" type="number" value="115200" min="300" max="4000000" required></label>
+      <div class="buttons"><button id="find" type="button" class="secondary">Find ports</button><button id="connect" type="submit">Connect</button><button id="disconnect" type="button" class="secondary">Disconnect</button></div>
+    </form>
+    <p id="source-hint">Connect through your running PlatformIO agent. Close any other monitor using the same port.</p>
+    <p id="connection-message" role="status">Choose a source to start streaming.</p><p id="notice" role="alert"></p>
+  </section>
+  <div class="toolbar"><div><span id="sample-count">0 samples</span><span class="divider">/</span><span id="uptime">Device time —</span></div><div class="buttons"><label class="inline">Plot window<select id="window"><option value="15">15 seconds</option><option value="30" selected>30 seconds</option><option value="60">60 seconds</option></select></label><button id="export" class="secondary">Export CSV</button></div></div>
+  <section class="panel recording-panel"><div class="section-heading"><div><div class="eyebrow">CSV RECORDING</div><h2>Save stream to disk</h2></div></div><div class="buttons"><button id="record-start" type="button">Start stream to CSV</button><button id="record-stop" type="button" class="secondary" disabled>Stop stream</button><a id="record-download" hidden>Download CSV</a></div><p id="record-status" role="status">Live viewing continues with recording off.</p><p id="record-message" role="status"></p></section>
+  <section class="panel sampling-panel"><div class="section-heading"><div><div class="eyebrow">ACQUISITION</div><h2>Sampling and sensor ranges</h2></div><a id="adc-export" href="/api/adc-export" download>Export buffered raw ADC</a></div><p id="acquisition-status">Waiting for acquisition statistics</p><form id="ranges-form"><div class="buttons"><label>Acceleration range<select id="accel-range"><option value="2">±2 g</option><option value="4">±4 g</option><option value="8" selected>±8 g</option><option value="16">±16 g</option></select></label><label>Gyro range<select id="gyro-range"><option value="125">±125 °/s</option><option value="250">±250 °/s</option><option value="500">±500 °/s</option><option value="1000">±1000 °/s</option><option value="2000" selected>±2000 °/s</option></select></label><button id="apply-ranges" type="submit" disabled>Apply ranges</button><span class="unit">BMM350: fixed ±2000 µT</span></div></form><p id="ranges-reported">Waiting for range telemetry</p><p id="ranges-message" role="status"></p></section>
+  <section class="panel adc-panel">
+    <div class="section-heading"><div><div class="eyebrow">16-CHANNEL ADC</div><h2>Analog inputs</h2></div><label class="inline">Display<select id="adc-units"><option value="volts" selected>Scaled (volts by default)</option><option value="raw">Raw counts</option></select></label></div>
+    <div id="adc-range" class="unit">0–5 V · 2.5 V reference</div>
+    <form id="adc-diagnostic-form"><div class="buttons"><label>Temporary ADC diagnostic mode<select id="adc-diagnostic-channel"><option value="-1">Normal · all channels</option></select></label><button id="adc-diagnostic-apply" type="submit" disabled>Apply ADC selection</button></div></form>
+    <p>Single-channel mode holds the ADC on one input at 1 MHz SPI. Other channels are inactive. Select Normal to restore scanning.</p>
+    <p id="adc-diagnostic-reported" role="status">Waiting for ADC mode telemetry</p><p id="adc-diagnostic-message" role="status"></p>
+    <div id="adc-grid" class="adc-grid"></div>
+    <div class="plot-heading"><span>Channel history · toggle traces below</span><label class="inline">Show only<select id="adc-channel"></select></label></div>
+    <div id="adc-legend" class="trace-legend" aria-label="ADC graph traces"></div>
+    <p class="plot-note">Selected traces share an auto-scaled Y axis. Units appear in the legend. Click channel cards or legend entries to add/remove traces.</p>
+    <canvas id="adc-chart" aria-label="Selected ADC channel over time" role="img"></canvas>
+    <details class="scaling-settings"><summary>Channel scaling: y = m × volts + b</summary>
+      <p>Applied to the cards and history in scaled display mode. Saved in this browser.</p>
+      <form id="scaling-form"><div id="scaling-fields" class="scaling-grid"></div>
+        <div class="buttons"><button type="submit">Apply scaling</button><button id="scaling-reset" type="button" class="secondary">Reset to file defaults</button></div>
+        <p id="scaling-message" role="status"></p>
+      </form>
+    </details>
+  </section>
+  <section class="panel digital-panel"><div class="section-heading"><div><div class="eyebrow">DIGITAL INPUTS</div><h2>GPIO states</h2></div><span class="unit">HIGH / LOW</span></div><div id="gpio-grid" class="gpio-grid"></div></section>
+  <div class="imu-grid">
+    <section class="panel servo-panel"><div class="section-heading"><div><div class="eyebrow">PWM OUTPUTS</div><h2>Servo controls</h2></div></div><div class="buttons servo-safety"><button id="servo-enable" type="button" disabled>Enable servos</button><button id="servo-disable" type="button" class="secondary" disabled>Disable servos</button><button id="servo-estop" type="button" class="estop" disabled>E-STOP</button><button id="servo-clear" type="button" class="secondary" disabled>Clear E-stop</button></div><p id="servo-safety-state" role="status">Servo state unconfirmed</p><p id="servo-safety-message" role="status"></p><p>Enable servos, then set pulse width and frequency and click Command. Disable and E-stop switch all PWM outputs off. E-stop stays latched until cleared; clearing leaves servos disabled. This software stop requires a working board connection and does not cut servo power.</p><div id="servo-controls"></div><p id="servo-message" role="status"></p></section>
+    <section class="panel feedback-panel"><div class="section-heading"><div><div class="eyebrow">CH5 / CH6 / CH7</div><h2>Servo feedback</h2></div><span id="feedback-units" class="unit"></span></div><div class="feedback-legend"><span>S3 FB · CH5</span><span>PAN FB · CH6</span><span>TILT FB · CH7</span></div><canvas id="feedback-chart" aria-label="S3 PAN and TILT feedback over time" role="img"></canvas></section>
+  </div>
+  <div class="imu-grid">
+    <section class="panel"><div class="section-heading"><div><div class="eyebrow">BMI323</div><h2>Acceleration</h2></div><span class="unit">g</span></div><div id="accel-values" class="axis-values"></div><canvas id="accel-chart" aria-label="Acceleration X Y Z over time" role="img"></canvas></section>
+    <section class="panel"><div class="section-heading"><div><div class="eyebrow">BMI323</div><h2>Angular velocity</h2></div><span class="unit">°/s</span></div><div id="gyro-values" class="axis-values"></div><canvas id="gyro-chart" aria-label="Gyroscope X Y Z over time" role="img"></canvas></section>
+    <section class="panel"><div class="section-heading"><div><div class="eyebrow">BMM350</div><h2>Magnetic field</h2></div><span class="unit">µT</span></div><div id="mag-values" class="axis-values"></div><canvas id="mag-chart" aria-label="Magnetic field X Y Z over time" role="img"></canvas></section>
+  </div>
+  <p id="sensor-errors" role="status"></p>
+  <section class="panel"><div class="section-heading"><div><div class="eyebrow">SERIAL OUTPUT</div><h2>Raw monitor</h2></div><label class="inline"><input id="follow" type="checkbox" checked> Auto-scroll</label></div><pre id="log" tabindex="0" aria-label="Raw serial monitor">Waiting for a connection…</pre></section>
+  <footer><span>Local telemetry and servo control</span><span id="retention">10,000 plot summaries · 2,048 raw ADC batches · CSV exports summaries</span></footer>
+</main>
+</body></html>
