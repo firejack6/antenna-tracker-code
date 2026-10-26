@@ -10,6 +10,12 @@
 #include "sampling_config.h"
 #include "sensor_config.h"
 #include "servo_control.h"
+#include "network_transport.h"
+#include "tilt_calibration.h"
+#include "tilt_imu.h"
+#include "status_frame.h"
+#include <math.h>
+#include <string.h>
 
 float totalCurrentAmps = NAN, output5vCurrentAmps = NAN, servoCurrentAmps = NAN;
 float output3v3CurrentAmps = NAN, output3v3VoltageVolts = NAN;
@@ -20,11 +26,17 @@ portMUX_TYPE sensorMux = portMUX_INITIALIZER_UNLOCKED;
 struct SensorState {
   DFRobot_BMI323::sSensorData accel, gyro;
   sBmm350MagData_t mag;
+  TiltImuSample imu;
   bool bmiValid = false, magValid = false, rangeFailed = false;
   int accelRange = ACCEL_RANGE_G, gyroRange = GYRO_RANGE_DPS;
   uint32_t bmiReads = 0, magReads = 0;
+  float chipTemperatureC = NAN;
+  uint64_t temperatureUs = 0;
 };
 SensorState sensors;
+TiltImuSample latestTiltImu() {
+  portENTER_CRITICAL(&sensorMux); const auto value = sensors.imu; portEXIT_CRITICAL(&sensorMux); return value;
+}
 struct RangeRequest { int accel, gyro; };
 QueueHandle_t rangeQueue;
 bool bmiReady = false, magReady = false;
@@ -67,10 +79,16 @@ bool handleSensorCommand(const char *line) {
 }
 
 void i2cTask(void *) {
-  SensorState state;
+  SensorState state; TiltImuFilter tiltFilter;
   uint32_t lastRetry = millis();
   uint32_t cycles = 0;
   for (;;) {
+    const uint64_t temperatureNow = esp_timer_get_time();
+    if (!state.temperatureUs || temperatureNow - state.temperatureUs >= 1000000 / CHIP_TEMPERATURE_HZ) {
+      // Sample on the I2C worker, not in the ADC or TCP hot paths.
+      state.chipTemperatureC = temperatureRead();
+      state.temperatureUs = esp_timer_get_time();
+    }
     if (uint32_t(millis() - lastRetry) >= 1000) {
       if (!bmiReady) bmiReady = bmi323.begin() && configureRanges(state.accelRange, state.gyroRange);
       if (!magReady && bmm350.begin() == 0) {
@@ -92,7 +110,11 @@ void i2cTask(void *) {
       }
     }
     state.bmiValid = bmiReady && bmi323.getAccelGyroData(&state.accel, &state.gyro);
-    if (state.bmiValid) ++state.bmiReads;
+    if (state.bmiValid) {
+      ++state.bmiReads;
+      tiltFilter.update(state.accel.x,state.accel.y,state.accel.z,state.gyro.x,state.gyro.y,esp_timer_get_time());
+      state.imu = tiltFilter.sample;
+    }
     state.magValid = magReady;
     if (magReady) { state.mag = bmm350.getGeomagneticData(); ++state.magReads; }
     portENTER_CRITICAL(&sensorMux); sensors = state; portEXIT_CRITICAL(&sensorMux);
@@ -101,9 +123,6 @@ void i2cTask(void *) {
   }
 }
 
-void printXYZ(const char *label, float x, float y, float z) {
-  Serial.printf("%s%.3f, %.3f, %.3f\n", label, x, y, z);
-}
 void setup() {
   Serial.begin(115200); Serial.setTxTimeoutMs(20);
   const uint32_t started = millis();
@@ -111,6 +130,7 @@ void setup() {
   Serial.println("Antenna tracker: binary ADC acquisition v1");
   const gpio_num_t inputs[] = {GPIO_NUM_46, GPIO_NUM_4, GPIO_NUM_13, GPIO_NUM_14};
   for (auto pin : inputs) { gpio_set_direction(pin, GPIO_MODE_INPUT); gpio_set_pull_mode(pin, GPIO_FLOATING); }
+  initTiltCalibration();
   initServoOutputs();
   Wire.begin(A4, A5); Wire.setClock(400000); Wire.setTimeOut(50);
   // Complete sensor reset/configuration before starting the fast ADC timer.
@@ -126,39 +146,69 @@ void setup() {
     Serial.println("Sensor error: failed to start I2C acquisition");
   if (!startAdcAcquisition()) Serial.println("ADC acquisition failed: check rate/configuration");
   if (!startControlReceiver()) Serial.println("Servo error: failed to start command receiver");
+  if (!startServoMotionTask()) Serial.println("Servo error: failed to start motion task");
+  startTelemetryNetwork();
 }
 void serviceTelemetry() {
+  if (!pollTelemetryNetwork()) { cancelServoMotion(); delay(10); return; }
+  readServoCommands();
+  // Servo motion runs on a dedicated higher-priority task; do not couple it to TCP.
+  // Retain partial output without blocking inbound commands (including E-stop).
+  if (!telemetryReady()) { delay(1); return; }
   const bool controlReply = printControlMessages();
-  sendAdcBatches();
+  if (controlReply) {
+    flushTelemetry(); // Small acknowledgement only, without a full status burst.
+    if (!telemetryReady()) { delay(1); return; }
+  }
+  // Catch up after a scheduling/network pause without starving status/control.
+  const uint64_t drainStarted = esp_timer_get_time();
+  for (unsigned batch = 0; batch < 4; ++batch) {
+    if (!telemetryReady() || !sendAdcBatches() || esp_timer_get_time() - drainStarted >= 8000) break;
+  }
   static uint32_t lastTelemetry = 0, lastScans = 0, lastBmi = 0, lastMag = 0;
   const uint32_t now = millis(), elapsed = now - lastTelemetry;
-  if (elapsed && (controlReply || elapsed >= 1000 / TELEMETRY_HZ)) {
+  if (elapsed >= 1000 / TELEMETRY_HZ) {
     SensorState state;
     portENTER_CRITICAL(&sensorMux); state = sensors; portEXIT_CRITICAL(&sensorMux);
     const auto adc = acquisitionStats();
-    Serial.printf("Time ms: %lu\n", (unsigned long)now);
+    const auto tcp = telemetryNetworkHealth();
+    const auto control = servoControlHealth();
     const int diagnostic = adcDiagnosticChannel();
-    Serial.printf("ADC mode: CHANNEL=%d SPI=%lu QUIET=%lu\n", diagnostic,
-      (unsigned long)(diagnostic < 0 ? ADC_SPI_HZ : ADC_DIAGNOSTIC_SPI_HZ),
-      (unsigned long)ADC_QUIET_US);
-    Serial.printf("Rates: ADC=%.1f BMI=%.1f MAG=%.1f MISSED=%lu DROPS=%lu INVALID=%lu MAXSCAN=%lu\n",
-      (adc.scans - lastScans) * 1000.0 / elapsed, (state.bmiReads - lastBmi) * 1000.0 / elapsed,
-      (state.magReads - lastMag) * 1000.0 / elapsed, (unsigned long)adc.missedTicks,
-      (unsigned long)adc.ringDrops, (unsigned long)adc.invalidScans, (unsigned long)adc.maxScanUs);
-    Serial.printf("Ranges: ACCEL=%d GYRO=%d MAG=%d READY=%d\n", state.accelRange, state.gyroRange, MAG_RANGE_UT, state.bmiValid);
-    Serial.printf("GPIO states: GPIO46=%d GPIO4=%d GPIO13=%d GPIO14=%d\n",
-      gpio_get_level(GPIO_NUM_46), gpio_get_level(GPIO_NUM_4), gpio_get_level(GPIO_NUM_13), gpio_get_level(GPIO_NUM_14));
-    printServoStates();
+    StatusFrame frame = {};
+    frame.device_ms = now;
+    frame.adc_channel = diagnostic;
+    frame.adc_spi_hz = diagnostic < 0 ? ADC_SPI_HZ : ADC_DIAGNOSTIC_SPI_HZ;
+    frame.adc_quiet_us = ADC_QUIET_US;
+    frame.rate_adc = (adc.scans - lastScans) * 1000.0f / elapsed;
+    frame.rate_bmi = (state.bmiReads - lastBmi) * 1000.0f / elapsed;
+    frame.rate_mag = (state.magReads - lastMag) * 1000.0f / elapsed;
+    frame.missed = adc.missedTicks; frame.drops = adc.ringDrops; frame.invalid = adc.invalidScans; frame.maxscan = adc.maxScanUs;
+    frame.queued = adc.queued; frame.capacity = adc.capacity;
+    frame.stalls = tcp.stalls; frame.failed = tcp.failedWrites; frame.maxwrite = tcp.maxWriteMs;
+    frame.connections = tcp.connections; frame.pending = tcp.pendingBytes; frame.close_reason = tcp.closeReason;
+    frame.commands = control.commands; frame.cmdmax = control.maxCommandUs; frame.ctrlmax = control.maxUpdateUs;
+    frame.accel_range = state.accelRange; frame.gyro_range = state.gyroRange; frame.mag_range = MAG_RANGE_UT;
+    frame.ranges_ready = state.bmiValid;
+    frame.gpio46 = gpio_get_level(GPIO_NUM_46); frame.gpio4 = gpio_get_level(GPIO_NUM_4);
+    frame.gpio13 = gpio_get_level(GPIO_NUM_13); frame.gpio14 = gpio_get_level(GPIO_NUM_14);
+    fillServoStatus(frame);
+    frame.bmi_valid = state.bmiValid; frame.mag_valid = state.magValid; frame.range_failed = state.rangeFailed;
     if (state.bmiValid) {
-      printXYZ("Accel g (x,y,z): ", state.accel.x, state.accel.y, state.accel.z);
-      printXYZ("Gyro dps (x,y,z): ", state.gyro.x, state.gyro.y, state.gyro.z);
-    } else Serial.println("BMI323 unavailable");
-    if (state.magValid) printXYZ("Mag uT (x,y,z): ", state.mag.float_x, state.mag.float_y, state.mag.float_z);
-    else Serial.println("BMM350 unavailable");
-    if (state.rangeFailed) Serial.println("Sensor error: range change failed");
-    Serial.println();
+      frame.accel[0] = state.accel.x; frame.accel[1] = state.accel.y; frame.accel[2] = state.accel.z;
+      frame.gyro[0] = state.gyro.x; frame.gyro[1] = state.gyro.y; frame.gyro[2] = state.gyro.z;
+    } else {
+      frame.accel[0] = frame.accel[1] = frame.accel[2] = NAN;
+      frame.gyro[0] = frame.gyro[1] = frame.gyro[2] = NAN;
+    }
+    if (state.magValid) {
+      frame.mag[0] = state.mag.float_x; frame.mag[1] = state.mag.float_y; frame.mag[2] = state.mag.float_z;
+    } else frame.mag[0] = frame.mag[1] = frame.mag[2] = NAN;
+    frame.chip_temp_c = state.chipTemperatureC; frame.chip_temp_us = state.temperatureUs;
+    sendStatusFrame(frame);
+    if (state.rangeFailed) queueControlMessage("Sensor error: range change failed");
     lastTelemetry = now; lastScans = adc.scans; lastBmi = state.bmiReads; lastMag = state.magReads;
   }
+  flushTelemetry();
   delay(1);
 }
 
@@ -169,7 +219,8 @@ void writerTask(void *) {
 void loop() {
   static bool started = false;
   if (!started) {
-    started = xTaskCreatePinnedToCore(writerTask, "usb-writer", 6144, nullptr, 1, nullptr, 0) == pdPASS;
+    // Above I2C polling (2), below ESP network/timer system tasks.
+    started = xTaskCreatePinnedToCore(writerTask, "tcp-writer", 6144, nullptr, 3, nullptr, 0) == pdPASS;
   }
   delay(100);
 }

@@ -1,19 +1,131 @@
+#include "servo_internal.h"
+#include "network_transport.h"
 #include <Arduino.h>
 #include <driver/ledc.h>
-#include <driver/gpio.h>
+#include <driver/mcpwm.h>
 #include <string.h>
 #include "servo_config.h"
 #include "servo_control.h"
 #include "acquisition.h"
-extern bool handleSensorCommand(const char *line);
+#include "servo_feedback.h"
+#include "tilt_imu.h"
+#include "servo_motion_config.h"
+#include "servo_motion_math.h"
+#include "tilt_calibration.h"
+#include "servo_feedback_filter.h"
+#include "continuous_speed_control.h"
+#include <esp_timer.h>
+#include "pan_calibration.h"
 
-namespace {
-struct ControlMessage { char text[96]; };
+extern bool handleSensorCommand(const char *line);
+float panMaxSpeedDegPerSec = panDefaultMaxSpeedDegPerSec;
+float tiltMaxSpeedDegPerSec = tiltDefaultMaxSpeedDegPerSec;
+float pwmSlewMaxRateUsPerSec[3] = {
+  panPwmSlewRateDefaultUsPerSec, tiltPwmSlewRateDefaultUsPerSec, s3PwmSlewRateDefaultUsPerSec};
+float pwmSlewAccelUsPerSec2[3] = {
+  panPwmSlewAccelDefaultUsPerSec2, tiltPwmSlewAccelDefaultUsPerSec2, s3PwmSlewAccelDefaultUsPerSec2};
+bool panOverspeedFaultEnabled = true;
+bool tiltOverspeedFaultEnabled = true;
+float panPositiveDeadbandUs = panPositiveDeadbandDefaultUs, panNegativeDeadbandUs = panNegativeDeadbandDefaultUs;
+float tiltPositiveDeadbandUs = tiltPositiveDeadbandDefaultUs, tiltNegativeDeadbandUs = tiltNegativeDeadbandDefaultUs;
+float panContinuousUsPerDegPerSec = panContinuousUsPerDegPerSecDefault;
+float panPwmRiseUsPerSec = panPwmRiseDefaultUsPerSec, panPwmFallUsPerSec = panPwmFallDefaultUsPerSec;
+float panStartupSearchUsPerSec = panStartupSearchDefaultUsPerSec, panStartupSearchMaxUs = panStartupSearchMaxDefaultUs;
+float panBrakingConfirmSeconds = panBrakingConfirmDefaultSeconds;
+float panPositionRampDegPerSec = positionRampDefaultDegPerSec, tiltPositionRampDegPerSec = positionRampDefaultDegPerSec;
+bool panPositionRampEnabled = positionRampDefaultEnabled, tiltPositionRampEnabled = positionRampDefaultEnabled;
+PositionPidConfig panPositionPidConfig = panPositionPidDefaults;
+PositionPidConfig tiltPositionPidConfig = tiltPositionPidDefaults;
+
+namespace servo_internal {
+PanCalibration panCalibration;
 QueueHandle_t messages = nullptr;
 portMUX_TYPE servoMux = portMUX_INITIALIZER_UNLOCKED;
-bool ready[3] = {}, enabled[3] = {};
+bool ready[3] = {}, enabled[3] = {}, manualDirect[3] = {};
 bool armed = false, estopLatched = false;
+ServoControlHealth controlHealth;
+TiltSweep tiltSweep;
+PwmSweep pwmSweep[3] = {};
+float pwmSlewVelocityUsPerSec[3] = {};
+ServoPotFilter tiltPotFilter;
+ServoVelocityWindow tiltVelocityWindow;
+ConsecutiveFeedbackFault overspeedConfirmation[2];
+uint64_t invalidVelocityStartedUs[2] = {};
+uint64_t lastValidTiltPotUs = 0;
+ServoVelocityPotFilter tiltVelocityPotFilter;
+float savedSweepSpeedLimit = 0;
 uint32_t pulseUs[3] = {}, frequencyHz[3] = {};
+float actualTiltPulseUs = 1500;
+uint32_t targetPulseUs[3] = {};
+float rampPulseUs[3] = {}, measuredDegrees[2] = {NAN, NAN}, measuredSpeed[2] = {NAN, NAN};
+float filteredDegrees[2] = {NAN, NAN};
+uint64_t lastFeedbackUs[2] = {}, lastMotionUs = 0;
+float trajectoryVelocity[2] = {};
+uint64_t trackingFaultStartedUs[2] = {};
+float continuousDemandSpeed[2] = {};
+ContinuousSpeedControl speedControl[2];
+PositionPid positionPid[2];
+bool positionActive[2] = {};
+float positionTarget[2] = {}, positionSetpoint[2] = {};
+int tiltImuAxis = tiltImuAxisDefault;
+bool tiltImuMappingReady = tiltImuMappingDefaultReady;
+float tiltImuZero = tiltImuZeroDefaultDeg;
+unsigned tiltImuMappedMinPulse = tiltImuMappedMinPulseDefault, tiltImuMappedMaxPulse = tiltImuMappedMaxPulseDefault;
+float tiltImuMinPulseAngle = tiltImuAngleAtMinPulseDefault, tiltImuMaxPulseAngle = tiltImuAngleAtMaxPulseDefault;
+bool usesImu(int i) { return i == 1 && !tiltContinuousRotation && tiltImuControlEnabled; }
+bool imuFresh(const TiltImuSample &s, uint64_t now) {
+  return s.deviceUs && now >= s.deviceUs && now-s.deviceUs <= servoFeedbackTimeoutUs && isfinite(s.angle[tiltImuAxis]) && isfinite(s.speed[tiltImuAxis]);
+}
+float previousFeedbackAngle[2] = {NAN, NAN};
+bool continuous(int i) { return i == 0 ? panContinuousRotation : i == 1 && tiltContinuousRotation; }
+unsigned neutralPulse(int i) { return i == 0 ? unsigned(lroundf(panCalibration.neutral)) : tiltNeutralPulseUs; }
+int continuousDirection(int i) { return i == 0 ? int(panCalibration.polarity) : (tiltSweep.status == TiltSweepStatus::Running ? tiltSweep.pwmPolarity : tiltContinuousDirection); }
+float continuousFeedforward(int i) { return i == 0 ? panContinuousUsPerDegPerSec : tiltContinuousUsPerDegPerSec; }
+float speedLimit(int i) { return i == 0 ? panMaxSpeedDegPerSec : tiltMaxSpeedDegPerSec; }
+float minAngle(int i) { return i == 0 ? panAngleAtMinPulseDeg : tiltAngleAtMinPulseDeg; }
+float maxAngle(int i) { return i == 0 ? panAngleAtMaxPulseDeg : tiltAngleAtMaxPulseDeg; }
+float positionLowerAngle(int i) {
+  if (i == 0) return panCalibration.amin;
+  if (usesImu(i)) return fminf(tiltImuMinPulseAngle,tiltImuMaxPulseAngle);
+  const auto c = getTiltCalibration();
+  const float mapping = fminf(minAngle(i), maxAngle(i)) - (i == 1 ? c.zeroDeg : 0);
+  return i == 1 ? (continuous(i) ? c.minAngleDeg : fmaxf(c.minAngleDeg, mapping)) : mapping;
+}
+float positionUpperAngle(int i) {
+  if (i == 0) return panCalibration.amax;
+  if (usesImu(i)) return fmaxf(tiltImuMinPulseAngle,tiltImuMaxPulseAngle);
+  const auto c = getTiltCalibration();
+  const float mapping = fmaxf(minAngle(i), maxAngle(i)) - (i == 1 ? c.zeroDeg : 0);
+  return i == 1 ? (continuous(i) ? c.maxAngleDeg : fminf(c.maxAngleDeg, mapping)) : mapping;
+}
+float angularPositionPulse(int i, float relativeAngle) {
+  const auto &c = SERVO_CONFIG[i];
+  if (usesImu(i)) return deviceAngleToPulse(relativeAngle,tiltImuMappedMinPulse,tiltImuMappedMaxPulse,tiltImuMinPulseAngle,tiltImuMaxPulseAngle);
+  const float zero = i == 1 ? getTiltCalibration().zeroDeg : 0;
+  return deviceAngleToPulse(relativeAngle + zero, c.minPulseUs, c.maxPulseUs, minAngle(i), maxAngle(i));
+}
+float feedbackAngle(const ServoFeedback &fb, int i) { return i == 0 ? panAngleFromVolts(fb.panVolts, panCalibration) : fb.tiltDegrees; }
+bool feedbackFresh(const ServoFeedback &fb, int i, uint64_t now) {
+  return fb.deviceUs && now >= fb.deviceUs && now - fb.deviceUs <= servoFeedbackTimeoutUs && isfinite(feedbackAngle(fb, i));
+}
+bool applyPulse(int i, float pulse) {
+  if (i == 1) {
+    // 3.2 MHz timer: 0.3125-us pulse steps at either 50 or 100 Hz.
+    // Preserve fractional controller output instead of rounding to whole us.
+    const float quantized = roundf(pulse * 3.2f) / 3.2f;
+    if (mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A,
+          quantized * frequencyHz[i] / 10000.0f) != ESP_OK ||
+        mcpwm_set_duty_type(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, MCPWM_DUTY_MODE_0) != ESP_OK) return false;
+    actualTiltPulseUs = quantized;
+    portENTER_CRITICAL(&servoMux); pulseUs[i] = uint32_t(lroundf(quantized)); enabled[i] = true; portEXIT_CRITICAL(&servoMux);
+    return true;
+  }
+  const uint32_t duty = (uint64_t(lroundf(pulse)) * frequencyHz[i] * 16384 + 500000) / 1000000;
+  if (duty >= 16384 || ledc_set_duty(LEDC_LOW_SPEED_MODE, ledc_channel_t(i), duty) != ESP_OK ||
+      ledc_update_duty(LEDC_LOW_SPEED_MODE, ledc_channel_t(i)) != ESP_OK) return false;
+  portENTER_CRITICAL(&servoMux); pulseUs[i] = pulse; enabled[i] = true; portEXIT_CRITICAL(&servoMux);
+  return true;
+}
 bool validConfig(const ServoConfig &c) {
   return c.minPulseUs > 0 && c.minPulseUs <= c.centerPulseUs && c.centerPulseUs <= c.maxPulseUs &&
     c.minFrequencyHz > 0 && c.minFrequencyHz <= c.centerFrequencyHz && c.centerFrequencyHz <= c.maxFrequencyHz &&
@@ -22,15 +134,25 @@ bool validConfig(const ServoConfig &c) {
     c.presetCenterPulseUs <= c.presetMaxPulseUs && c.presetMaxPulseUs <= c.maxPulseUs;
 }
 void stopOutput(int i) {
-  ledc_stop(LEDC_LOW_SPEED_MODE, ledc_channel_t(i), 0);
+  manualDirect[i] = false;
+  pwmSweep[i].active = false;
+  pwmSlewVelocityUsPerSec[i] = 0;
+  if (i < 2) { positionActive[i] = false; positionPid[i].reset(); }
+  if (i == 1 && tiltSweep.status == TiltSweepStatus::Running) {
+    tiltSweep.status = TiltSweepStatus::Cancelled; tiltMaxSpeedDegPerSec = savedSweepSpeedLimit;
+  }
+  if (i == 1) mcpwm_set_signal_low(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A);
+  else ledc_stop(LEDC_LOW_SPEED_MODE, ledc_channel_t(i), 0);
   portENTER_CRITICAL(&servoMux);
   enabled[i] = false;
+  targetPulseUs[i] = pulseUs[i]; rampPulseUs[i] = pulseUs[i];
   portEXIT_CRITICAL(&servoMux);
+  if (i < 2) { trajectoryVelocity[i] = 0; trackingFaultStartedUs[i] = 0; overspeedConfirmation[i].reset(); speedControl[i].reset(); continuousDemandSpeed[i] = 0; }
 }
 void acknowledge(int i) {
   ControlMessage message = {};
-  snprintf(message.text, sizeof(message.text), "Servo ack: %s PULSE=%lu FREQ=%lu ENABLE=%d", SERVO_CONFIG[i].name,
-    (unsigned long)pulseUs[i], (unsigned long)frequencyHz[i], enabled[i]);
+  snprintf(message.text, sizeof(message.text), "Servo ack: %s PULSE=%lu FREQ=%lu ENABLE=%d TARGET=%lu", SERVO_CONFIG[i].name,
+    (unsigned long)pulseUs[i], (unsigned long)frequencyHz[i], enabled[i], (unsigned long)targetPulseUs[i]);
   queueControlMessage(message.text);
 }
 void safetyState() {
@@ -57,56 +179,29 @@ bool safetyCommand(const char *line) {
   } else { queueControlMessage("Servo error: expected SERVOS ENABLE, DISABLE, ESTOP, or CLEAR"); return true; }
   safetyState(); return true;
 }
-void command(const char *line) {
-  if (safetyCommand(line)) return;
-  char axis[8] = {}, tail[8] = {};
-  unsigned long pulse = 0, frequency = 0;
-  int consumed = 0;
-  int i = -1;
-  if (sscanf(line, "SERVO %7s", axis) != 1) { queueControlMessage("Servo error: invalid command"); return; }
-  for (int n = 0; n < 3; ++n) if (!strcmp(axis, SERVO_CONFIG[n].name)) i = n;
-  if (i < 0 || !ready[i]) { queueControlMessage("Servo error: unknown or unavailable output"); return; }
-  if (sscanf(line, "SERVO %7s %7s %n", axis, tail, &consumed) == 2 &&
-      !strcmp(tail, "OFF") && line[consumed] == '\0') {
-    stopOutput(i); acknowledge(i); return;
-  }
-  consumed = 0;
-  if (!armed || estopLatched) {
-    queueControlMessage(estopLatched ? "Servo error: E-stop latched" : "Servo error: servos disabled; enable first"); return;
-  }
-  if (sscanf(line, "SERVO %7s %lu %lu %n", axis, &pulse, &frequency, &consumed) != 3 ||
-      line[consumed] != '\0') { queueControlMessage("Servo error: expected SERVO axis pulse_us frequency_hz"); return; }
-  const auto &c = SERVO_CONFIG[i];
-  if (pulse < c.minPulseUs || pulse > c.maxPulseUs || frequency < c.minFrequencyHz || frequency > c.maxFrequencyHz ||
-      uint64_t(pulse) * frequency >= 1000000) {
-    queueControlMessage("Servo error: command outside configured limits"); return;
-  }
-  // ESP-IDF returns ESP_OK (zero), unlike Arduino ledcSetup's frequency return.
-  if (ledc_set_freq(LEDC_LOW_SPEED_MODE, ledc_timer_t(i), frequency) != ESP_OK) {
-    stopOutput(i); queueControlMessage("Servo error: frequency unavailable"); return;
-  }
-  const uint32_t actualHz = ledc_get_freq(LEDC_LOW_SPEED_MODE, ledc_timer_t(i));
-  if (!actualHz) {
-    stopOutput(i); queueControlMessage("Servo error: frequency readback unavailable"); return;
-  }
-  // get_freq() truncates fractional hertz. Use the requested nominal period;
-  // divider quantization is much smaller than truncating 49.999 Hz to 49 Hz.
-  const uint32_t duty = (uint64_t(pulse) * frequency * 16384 + 500000) / 1000000;
-  if (duty >= 16384 || ledc_set_duty(LEDC_LOW_SPEED_MODE, ledc_channel_t(i), duty) != ESP_OK ||
-      ledc_update_duty(LEDC_LOW_SPEED_MODE, ledc_channel_t(i)) != ESP_OK) {
-    stopOutput(i); queueControlMessage("Servo error: PWM update failed"); return;
-  }
-  portENTER_CRITICAL(&servoMux);
-  pulseUs[i] = pulse; frequencyHz[i] = frequency; enabled[i] = true;
-  portEXIT_CRITICAL(&servoMux);
-  acknowledge(i);
-}
-}
+
+}  // namespace servo_internal
+
+using namespace servo_internal;
 
 void initServoOutputs() {
+  loadPanSettings(); // Configuration only: never restore output/arming state.
   for (int i = 0; i < 3; ++i) {
     const auto &c = SERVO_CONFIG[i];
     if (!validConfig(c)) { Serial.println("Servo error: invalid configuration"); continue; }
+    if (i == 1) {
+      mcpwm_config_t config = {};
+      config.frequency = c.centerFrequencyHz; config.counter_mode = MCPWM_UP_COUNTER;
+      config.duty_mode = MCPWM_DUTY_MODE_0;
+      ready[i] = mcpwm_group_set_resolution(MCPWM_UNIT_0, 32000000) == ESP_OK &&
+        mcpwm_timer_set_resolution(MCPWM_UNIT_0, MCPWM_TIMER_0, 3200000) == ESP_OK &&
+        mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM0A, c.gpio) == ESP_OK &&
+        mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_0, &config) == ESP_OK;
+      pulseUs[i] = neutralPulse(i); frequencyHz[i] = c.centerFrequencyHz;
+      targetPulseUs[i] = pulseUs[i]; rampPulseUs[i] = pulseUs[i];
+      if (ready[i]) stopOutput(i);
+      continue;
+    }
     ledc_timer_config_t timer = {};
     timer.speed_mode = LEDC_LOW_SPEED_MODE; timer.duty_resolution = LEDC_TIMER_14_BIT;
     timer.timer_num = ledc_timer_t(i); timer.freq_hz = c.centerFrequencyHz; timer.clk_cfg = LEDC_USE_APB_CLK;
@@ -116,20 +211,28 @@ void initServoOutputs() {
     channel.channel = ledc_channel_t(i); channel.timer_sel = ledc_timer_t(i);
     channel.intr_type = LEDC_INTR_DISABLE; channel.duty = 0;
     ready[i] = ledc_channel_config(&channel) == ESP_OK;
-    pulseUs[i] = c.centerPulseUs; frequencyHz[i] = c.centerFrequencyHz;
+    pulseUs[i] = continuous(i) ? neutralPulse(i) : c.centerPulseUs; frequencyHz[i] = c.centerFrequencyHz;
+    targetPulseUs[i] = pulseUs[i]; rampPulseUs[i] = pulseUs[i];
     if (ready[i]) stopOutput(i);
   }
 }
 
-void readServoCommands() {
+void readServoCommands(bool reset) {
   static char buffer[80]; static size_t used = 0; static bool overflow = false;
-  for (int budget = 0; budget < 128 && Serial.available(); ++budget) {
-    const char ch = Serial.read();
+  if (reset) { used = 0; overflow = false; cancelServoMotion(); return; }
+  for (int budget = 0; budget < 128 && telemetryStream().available(); ++budget) {
+    const char ch = telemetryStream().read();
     if (ch == '\r') continue;
     if (ch == '\n') {
       buffer[used] = '\0';
       if (overflow) queueControlMessage("Servo error: command too long");
-      else if (used && !handleAdcCommand(buffer) && !handleSensorCommand(buffer)) command(buffer);
+      else if (used) {
+        const uint64_t started = esp_timer_get_time();
+        if (!handleAdcCommand(buffer) && !handleSensorCommand(buffer)) command(buffer);
+        ++controlHealth.commands;
+        const unsigned elapsed = esp_timer_get_time() - started;
+        if (elapsed > controlHealth.maxCommandUs) controlHealth.maxCommandUs = elapsed;
+      }
       used = 0; overflow = false;
     } else if (used < sizeof(buffer) - 1 && !overflow) buffer[used++] = ch;
     else overflow = true;
@@ -146,35 +249,17 @@ void queueControlMessage(const char *text) {
 bool startControlReceiver() {
   messages = xQueueCreate(32, sizeof(ControlMessage));
   if (!messages) return false;
-  return xTaskCreatePinnedToCore([](void *) {
-    for (;;) { readServoCommands(); delay(1); }
-  }, "control-rx", 4096, nullptr, 5, nullptr, 0) == pdPASS;
+  return true; // TCP socket commands are read by the sole writer task.
 }
 
 bool printControlMessages() {
   ControlMessage message;
   bool any = false;
   while (messages && xQueueReceive(messages, &message, 0) == pdPASS) {
-    Serial.println(message.text); any = true;
+    telemetryStream().println(message.text); any = true;
   }
   return any;
 }
 
-void printServoStates() {
-  bool active[3]; uint32_t pulses[3], frequencies[3];
-  bool canCommand, stopped;
-  portENTER_CRITICAL(&servoMux);
-  memcpy(active, enabled, sizeof(active)); memcpy(pulses, pulseUs, sizeof(pulses)); memcpy(frequencies, frequencyHz, sizeof(frequencies));
-  canCommand = armed; stopped = estopLatched;
-  portEXIT_CRITICAL(&servoMux);
-  Serial.printf("Servo safety: ARMED=%d ESTOP=%d\n", canCommand, stopped);
-  for (int i = 0; i < 3; ++i) {
-    const auto &c = SERVO_CONFIG[i];
-    Serial.printf("Servo %s: GPIO=%d PMIN=%lu PCENTER=%lu PMAX=%lu FMIN=%lu FCENTER=%lu FMAX=%lu PULSE=%lu FREQ=%lu ENABLE=%d READY=%d UMIN=%lu UCENTER=%lu UMAX=%lu\n",
-      c.name, c.gpio, (unsigned long)c.minPulseUs, (unsigned long)c.centerPulseUs, (unsigned long)c.maxPulseUs,
-      (unsigned long)c.minFrequencyHz, (unsigned long)c.centerFrequencyHz, (unsigned long)c.maxFrequencyHz,
-      (unsigned long)pulses[i], (unsigned long)frequencies[i], active[i], ready[i],
-      (unsigned long)c.presetMinPulseUs, (unsigned long)c.presetCenterPulseUs,
-      (unsigned long)c.presetMaxPulseUs);
-  }
-}
+
+ServoControlHealth servoControlHealth() { return controlHealth; }

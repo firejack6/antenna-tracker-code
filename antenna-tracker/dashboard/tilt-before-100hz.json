@@ -1,0 +1,30 @@
+{
+    "imu":  {
+                "angle":  -41.508,
+                "speed":  -0.077,
+                "raw":  -41.508,
+                "zero":  0.0,
+                "axis":  1.0,
+                "ready":  1.0,
+                "active":  1.0,
+                "amin":  43.2,
+                "amax":  -120.85,
+                "us":  4398333397.0,
+                "pmin":  900.0,
+                "pmax":  2000.0
+            },
+    "position":  {
+                     "target":  -45.0,
+                     "active":  1.0,
+                     "kp":  2.0,
+                     "ki":  0.0,
+                     "kd":  0.0,
+                     "ilimit":  20.0,
+                     "cap":  80.0,
+                     "tolerance":  0.5,
+                     "dbplus":  42.0,
+                     "dbminus":  60.0,
+                     "ramp":  1.0,
+                     "ramprate":  1.0
+                 }
+}

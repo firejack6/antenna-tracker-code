@@ -1,3 +1,118 @@
+# Wi-Fi TCP connection
+
+Firmware now sends ADC binary batches (**ATB2**), compact binary status (**ATS1**),
+and text control acknowledgements/errors over Wi-Fi TCP. USB prints
+startup/network diagnostics only; PlatformIO Remote is needed only for uploading,
+not for dashboard telemetry.
+
+## Configuration sources of truth
+
+| Kind | Where it lives | Survives reboot? |
+| --- | --- | --- |
+| Compile-time defaults | `src/*_config.h`, `pan_calibration.h`, `tilt_calibration.h` | N/A (flash image) |
+| PAN calibration + PID/deadband/ramp/speed | ESP NVS `pan-settings` via Save PAN | Yes |
+| TILT pot mapping / angle limits | ESP NVS `tilt-cal` | Yes |
+| TILT IMU map / TILT position PID | RAM (Apply in UI) | No — resets to headers |
+| ADC channel display scaling | `dashboard/channel-scaling.js` + browser `localStorage` | Browser only |
+| Map / UI prefs | browser `localStorage` | Browser only |
+
+`GET /api/config` returns the latest board `effective_config` from ATS1 plus these source notes.
+
+1. Upload the firmware to the Nano ESP32.
+2. Start `start-dashboard.ps1`; it asks Windows to join **antenna-tracker** using
+   the name/password in `src/network_config.h`, then opens the dashboard.
+3. If Windows rejects the Wi-Fi request, join the hotspot manually (password
+   **changeme123**). The launcher prints the Windows error and still starts.
+4. Select **Wi-Fi TCP**, enter **192.168.20.1:9000**, then Connect.
+
+Edit `src/network_config.h` for the Wi-Fi name/password, TCP port and network
+mode. To join an existing router, set `WIFI_ACCESS_POINT = false` and enter
+that router's SSID/password. Connect the PC to the same network and use the
+ESP IP address printed on USB at startup, followed by `:9000`.
+
+The launcher installs a Wi-Fi profile for the current Windows user and explicitly
+connects on each launch. Use `./start-dashboard.ps1 -SkipWifi` to keep your current
+network, or `-WifiInterface 'Wi-Fi'` to select an adapter if you have several.
+It skips hotspot setup when `WIFI_ACCESS_POINT = false`. Windows may require
+location permission for Wi-Fi operations; if it reports access denied, enable
+Location services and desktop app location access in Windows Settings.
+
+The dashboard preserves plotting, full-rate CSV, channel scaling and controls.
+The same timestamped, CRC-checked ADC packets are used over TCP. Network
+interruptions after a successful TCP connection trigger reconnects every five
+seconds until Disconnect is clicked. Initial connection failures use bounded
+retries. Queued controls and partial commands
+are discarded across connections. Servos remain disabled at boot. Only one
+TCP dashboard client is accepted at a time.
+
+ADC buffering holds 4,096 records in PSRAM (about 0.4 seconds at 10 kHz),
+with a 2,048-record internal-RAM fallback if PSRAM is unavailable. Status text
+is batched into a single TCP write. Partially sent output stays in an owned send
+queue and retries without blocking inbound controls. Temporary 500 ms stalls no
+longer force a reconnect; the connection closes on socket errors or five seconds
+without send progress (`TCP_NO_PROGRESS_TIMEOUT_MS` in `src/network_config.h`).
+Longer network
+pauses can cause counted buffer drops; TCP does not eliminate acquisition or
+buffer overruns. The configured ADC rate is a target, not a measured guarantee.
+The TCP writer runs above I2C polling priority and drains up to four ADC batches
+per pass (an 8 ms catch-up budget, apart from a blocked network write). ADC and
+TCP tasks copy ring payloads outside their shared lock. When full, the ring drops
+incoming records instead of overwriting unread ones; live channel values still
+update. `buffer drops` counts those discarded records. `missed ticks` counts
+missed acquisition bursts, and `received gaps` includes both missed sampling and
+lost records. `max burst` measures an entire acquisition burst, not one scan.
+The raw monitor samples routine telemetry once per second and only redraws
+when new log entries arrive. **Pause monitor** freezes its display while live
+plots, control acknowledgements and CSV recording continue.
+
+The connection health panel shows time since the last valid ADC batch, a rolling
+10-second ADC receive rate and byte rate, recent sequence gaps, estimated ESP
+buffer delay, TCP stalls/failed writes, longest write and session reconnects.
+Recent gaps include acquisition misses and discarded data, not Wi-Fi packet loss.
+ESP counters are cumulative since boot; buffer values are last reported telemetry.
+TCP health also reports pending output bytes and the last close reason: peer
+disconnect, socket error, no-progress timeout, queue overflow or Wi-Fi unavailable.
+
+For overnight tests, every gap **over 100 ms between valid ADC batch deliveries**
+counts as one dropout. The relay logs onset and recovery (with UTC timestamps and
+duration) to `dashboard/health-logs/dropouts-*.csv`, automatically and independently
+of full-rate CSV recording. Download the current log from the health panel.
+An outage is counted while still ongoing; a permanent disconnect is not missed.
+Monitoring begins with the first ADC batch, continues across automatic reconnects
+and with the browser closed, and stops on deliberate Disconnect/relay shutdown.
+A new Connect starts a fresh counter/file; old files remain on disk. Keep Windows
+and the relay awake overnight. A `started` row without a recovery row indicates
+an unfinished outage (for example a process crash). File errors appear in the UI.
+**View dropout log** opens the latest 200 event rows in the dashboard, refreshing
+once per second while open. The CSV download contains the complete session.
+
+ESP32-S3 internal chip temperature is sampled at 5 Hz (`CHIP_TEMPERATURE_HZ` in
+`src/sampling_config.h`). During hardware connections, each received sample is
+automatically saved to `dashboard/health-logs/temperature-*.csv` with PC UTC and
+device microsecond timestamps, even when full-rate recording is off. The health
+panel shows temperature and a CSV download. Full-rate ADC CSV also includes
+`chip_temp_c` and `chip_temp_device_us`, repeating the latest temperature until
+a new sample arrives. This is chip temperature, not ambient temperature.
+
+Each servo's **−100 µs / +100 µs** buttons change the pulse field by 100 µs and immediately
+send it using the selected frequency. They require enabled servos and fresh
+telemetry, respects the absolute pulse range, and waits for acknowledgement
+before another step. A button is disabled if its next step would exceed the limits.
+
+The orientation indicator displays acceleration-derived roll/pitch and tilt-
+compensated magnetic heading in the sensor frame (+X forward, +Y right, +Z up
+at rest). It is an estimate without gyro fusion, mounting correction, magnetic
+calibration or declination correction. It marks stale sensor data explicitly.
+Charts hold their auto-scaled Y range for five seconds before gradually shrinking
+it. ADC lines use weighted batch means per screen pixel; translucent min/max bands
+preserve excursions. These display changes do not filter the full-rate CSV data.
+
+USB serial and PlatformIO remote are **debug-only** transports. The dashboard
+hides them unless **Show debug sources** is checked. Use Wi-Fi TCP for normal
+operation; the serial/remote sections below remain for lab debugging.
+
+---
+
 # Nano ESP32 sensor monitor
 
 Firmware acquires ADS7953 channels CH0–CH15 at a requested 10,000 scans/s
@@ -212,12 +327,12 @@ file to load new defaults. Choose **Raw counts** to bypass scaling. CSV exports
 and the raw serial monitor continue to contain the original measurements.
 Restart the dashboard relay after updating it to serve the new configuration file.
 
-### PlatformIO remote
+### PlatformIO remote (debug only)
 
-1. Close your existing `pio remote --agent desktop-o1gdd79 device monitor` session
+1. In the dashboard, enable **Show debug sources**, then select **PlatformIO remote**.
+2. Close your existing `pio remote --agent desktop-o1gdd79 device monitor` session
    so it releases the port. Keep the remote **agent** running.
-2. Select **PlatformIO remote**. The agent defaults to `desktop-o1gdd79`.
-3. Click **Find ports**, select a port, and click **Connect**. The tested device
+3. The agent defaults to `desktop-o1gdd79`. Click **Find ports**, select a port, and click **Connect**. The tested device
    was on **COM8**; Windows may assign a different port after reconnecting.
 4. Click **Disconnect** before using another monitor or uploading firmware.
 
@@ -229,13 +344,13 @@ PlatformIO interface; a future Core change may require a relay update. The raw
 log shows startup/authentication/port errors. `PIO_EXECUTABLE` can override the
 path to the `pio` executable if needed.
 
-### Direct connection
+### Direct connection (debug only)
 
-Connect the Nano by USB to the computer running the relay. Select **Direct USB
-serial**, click **Find ports**, choose its COM port (or `/dev/ttyACM0` on Linux),
-then **Connect**. This mode uses pySerial directly and does not need a remote
-agent, PlatformIO login, or browser-specific USB permissions. It works in any
-modern browser through the local relay. Close other serial monitors first.
+Connect the Nano by USB to the computer running the relay. Enable **Show debug
+sources**, select **Direct USB serial**, click **Find ports**, choose its COM
+port (or `/dev/ttyACM0` on Linux), then **Connect**. This mode uses pySerial
+directly and does not need a remote agent, PlatformIO login, or browser-specific
+USB permissions. Close other serial monitors first. Prefer Wi-Fi TCP in the field.
 
 The Windows launcher reuses pySerial from PlatformIO. For a standalone Python
 installation (Python 3.10 or newer), or macOS/Linux:
@@ -370,3 +485,132 @@ To isolate native USB delivery from the remote serial bridge, run
 `pio remote --agent desktop-o1gdd79 run --force-remote -e arduino_nano_esp32 -t measure`.
 This reads COM8 locally on the agent for 10 seconds without issuing servo commands.
 The measurement helper lives in `shared/` so PlatformIO synchronizes it to the agent.
+
+PAN/TILT speed limits are in `src/servo_motion_config.h` (default 30 device
+degrees/second). The dashboard's **Apply speed** changes the runtime limit;
+0 disables limiting. These settings do not enable outputs. The dashboard's
+main Command/±100 buttons apply the entered limit
+atomically with each continuous demand; a separate Apply speed click is optional.
+Firmware code can
+read/write `panMaxSpeedDegPerSec` and `tiltMaxSpeedDegPerSec` using that header.
+`latestServoFeedback()` in `src/servo_feedback.h` returns input volts and device
+angles: CH7 TILT maps 0.004–3.3 V to 0–360 degrees; CH6 PAN maps five pot turns
+through 5:1 gearing to 0–360 device degrees. Feedback is independent of display
+scaling. Both PAN and TILT are configured for continuous rotation. Their PWM
+frequency stays at 50 Hz; the provisional neutral/stop pulse is 1500 µs.
+Calibrate `panNeutralPulseUs`, `tiltNeutralPulseUs`, direction, and each
+`ContinuousUsPerDegPerSec` constant in `src/servo_motion_config.h`.
+
+The continuous controller interprets demand relative to neutral as signed
+device speed: 500 µs requests -max speed, 1500 µs stops, 2500 µs requests +max
+speed. It smoothly accelerates the speed setpoint (60 degrees/s²) and uses
+filtered feedback velocity, feedforward, and PI correction to drive the actual
+output pulse. Actual speed regulation needs physical tuning; magnitude is not
+a universal linear motor-speed calibration. `0` disables feedback regulation
+and uses a smoothly changing raw pulse instead; changing to 0 stops the output
+first and requires a new command. Stale feedback or excessive speed stops a
+regulated output. Losing TCP removes continuous PWM.
+PAN and TILT each have an **Enable/Disable overspeed fault** button. It toggles
+only overspeed stopping, including during TILT sweeps; speed regulation,
+stale-feedback stopping, angle limits and E-stop remain active. The button
+shows the board-reported state. Fault stopping defaults ON after every reboot;
+firmware code can reference `panOverspeedFaultEnabled` and
+`tiltOverspeedFaultEnabled` from `servo_motion_config.h`.
+Feedback velocity handles the 360° wrap. The UI reports measured angle/speed,
+requested speed, and actual PWM, with a **Neutral / Stop** button. Old position
+presets are stored separately. No physical calibration is run automatically.
+Restart the dashboard relay after updating its code.
+The hotspot uses 20 MHz bandwidth (`WIFI_AP_20MHZ` in `network_config.h`) to
+avoid 40 MHz bonding on 2.4 GHz. The PC requests a 1 MiB TCP receive buffer.
+Connection health reports the longest socket receive gap and decode time so
+network stalls can be distinguished from slow local processing.
+The **PID and position** panel selects PAN or TILT and shows aligned speed,
+position and PWM-offset plots with clickable colored legends. Speed includes
+requested speed, ramped setpoint, measured speed and controller error. Output
+includes actual PWM offset, requested offset, P/I/D, feedforward (including
+deadband), and startup compensation. These are reported controller terms,
+not reconstructed from plot samples. The position trace breaks at the pot wrap;
+all three plots use controller timestamps and the selected history window.
+
+TILT voltage mapping and angle limits have source defaults in
+`src/tilt_calibration.h`. Include it and call `getTiltCalibration()` to reference
+the current settings from firmware code. `latestServoFeedback().tiltDegrees`
+uses that mapping. The dashboard's TILT calibration panel lets you edit pot
+minimum/maximum volts, zero offset, and minimum/maximum angles. Angle is
+`(volts - minVolts) * 360 / (maxVolts - minVolts) - zeroDeg`.
+**Set current position as zero** saves the current pot angle as the offset.
+Saving settings/zero stops TILT. Settings persist in ESP NVS; source defaults
+do not override an already-saved calibration. Min/max limits stop motion toward
+an endpoint, including in raw PWM mode; motion back toward the allowed range
+remains possible. There is a 0.5-degree stop margin.
+
+**Start slow 360-degree sweep** is explicitly started calibration mode. Choose
+1-100 estimated deg/s (default 5), 1-20 rotations, minimum PWM offset (default
+42 us), and maximum offset (default 300 us, allowed 1-1000). The cap is a
+ceiling, and actual pulses remain within 500-2500 us. The minimum skips the
+inactive region at startup; subsequent PWM changes are gradual.
+
+TILT source defaults in `src/servo_motion_config.h` use positive/negative
+deadband offsets of 42/60 us (negative provisional), feedforward .03
+us/(deg/s), Running Kp .08, Ki .02, and integral bounded to +/-4 us.
+Starting and Recovering disable PI windup. PWM rises at 2 us/s and falls at
+200 us/s during regulation; explicit stops and faults stop immediately.
+A separate startup search adds .5 us/s up to 8 us. Running drive may fall
+at most 10 us below the initial confirmed breakaway offset. The sweep cap
+bounds all compensation. These values remain under physical tuning.
+
+TILT feedback/control runs at 200 Hz. A three-sample median feeds an 80 ms
+regression velocity estimate; a five-sample median feeds angle and sweep
+mapping. Raw logging is unchanged. Telemetry reports raw VOLTS and control
+FILTERED voltage. Invalid differentiated samples briefly hold PWM rather
+than reducing startup drive. Sustained invalid feedback still stops motion.
+Pot-voltage direction selects the desired increasing/decreasing voltage trend.
+Sweep PWM polarity separately selects whether pulses above neutral increase or
+decrease voltage. The sweep learns the actual voltage trend without faulting
+for direction and reports which PWM direction increases voltage. This setting applies to
+the sweep only; normal TILT polarity is `tiltContinuousDirection` in
+`src/servo_motion_config.h`.
+It temporarily bypasses angle
+limits, so the full turn must be mechanically clear. Completion uses the pot
+voltage wrap and return to the starting voltage, rather than an assumed voltage
+span. Stop sweep, Off, Disable, E-stop, or connection loss cancels it; stale or
+invalid feedback, no initial movement within 60 seconds, a fifteen-second stall
+after movement starts, and timeout stop it with a specific reported fault.
+Neutral/direction/speed calibration still matter; actual sweep speed requires
+physical verification. After completion, **Apply measured voltage range** saves
+the extrema; set zero again afterwards. Neither editing nor startup starts a
+sweep. Automated checks use simulated servos only.
+
+TILT slow sweep: set whole rotations (1?20), sweep speed, minimum PWM offset/deadband from neutral (0 allowed), and maximum offset in the dashboard before starting. Minimum offset sets both startup drive and feedforward deadband compensation: startup skips the inactive region by immediately applying this offset from neutral, then additional drive ramps gradually. Use 0 for neutral startup. Speed regulation can reduce the output below this offset. Defaults are `tiltSweepRotations`, `tiltSweepMinimumOffsetUs`, and `tiltSweepMaxPulseOffsetUs` in `src/tilt_calibration.h`. Sweeps bypass angle limits and retain stall, timeout, feedback, and enabled overspeed protection.
+
+TILT tuning (2026-10-11): source defaults are in `src/servo_motion_config.h`. The controller reports Starting, Running, and Recovering phases. Starting disables PI windup; Running requires both sustained movement and measurable travel; Recovering begins after a sustained pause. Invalid differentiated speed briefly holds PWM rather than reducing startup drive. Overspeed faults require six fresh readings and 500 ms continuously above the threshold. TILT uses MCPWM at 3.2 MHz (0.3125 us steps at 50 Hz), with feedback/control at 200 Hz and an 80 ms regression velocity estimate. PAN and S3 retain LEDC. The PID OUTPUT trace reports fractional TILT pulse offset. Negative TILT direction remains provisionally calibrated; smooth constant-speed operation is still being tuned.
+
+For shared live tuning, launch `python dashboard/relay.py --host 192.168.20.2 --no-browser` (substitute this PC's actual hotspot IP). Other PCs on the ESP Wi-Fi can open that address on port 8765. The dashboard owns the only ESP TCP connection; `dashboard/tune_servo_shared.py` sends tuning commands through its HTTP API so viewers do not open another ESP socket.
+
+PAN and TILT now offer pot-feedback **position control** as the primary dashboard
+command. The servos remain programmed for continuous rotation: enter a target
+angle and click **Go to position**. TILT uses its configured voltage mapping,
+zero, and angle limits; PAN uses 360 device degrees after its 5:1 gearing.
+The positive speed setting slews the angle target in degrees/s; it is not a
+guarantee of actual shaft speed. Stop, Disable, E-stop, and connection loss stop
+the output. Manual PWM and speed commands remain under an expandable section.
+
+Expand **Position PID gains** on each axis to change P, I, D, integral limit,
+PWM offset limit, and position tolerance. Applying gains stops that axis and
+does not start movement. Reported values confirm what the ESP applied. These
+runtime values reset at ESP restart; source defaults and firmware-accessible
+`panPositionPidConfig` / `tiltPositionPidConfig` are in
+`src/servo_motion_config.h`. P outputs us/degree, I us/(degree second), and D
+us/(degree/second). Derivative acts on measured velocity, with bounded integral,
+anti-windup, and neutral output inside the configured position tolerance.
+The position plot includes measured angle, commanded target and ramped target.
+
+During TILT calibration sweeps, the calibrated pot seam is detected with endpoint hysteresis, including gradual high-to-low transitions. PI and velocity estimation pause while the last bounded pulse is held; telemetry reports WRAP=1 and unavailable speed. Normal estimation resumes at the opposite endpoint. The seam has an eight-second timeout (`tiltSweepRolloverTimeoutUs`); stale and invalid feedback still stop the sweep.
+
+Position target ramp rate is independently configurable per PAN/TILT in deg/s (default 30), or bypassed with the disable-ramps checkbox. Applying a ramp change stops the axis. TILT runtime values reset on reboot; PAN can be saved as described below. Source defaults are in `src/servo_motion_config.h`. Manual PWM uses a separate SERVO RAW command that writes PWM once and bypasses feedback regulation, ramps, angle checks and overspeed. Off, disable, E-stop and connection loss still stop the output.
+
+PAN calibration and saved settings: dashboard controls expose neutral PWM, PWM polarity (+1/-1), pot voltage endpoints, signed device angle span, zero offset, and position limits. Source calibration defaults are in `src/pan_calibration.h`. Full five-turn pot travel through 5:1 gearing is 360 device degrees. A negative span reverses measured angle direction; PWM polarity specifies which physical pulse direction increases that measured angle. Set current position as zero then adjust relative limits. Position targets follow the numeric angle interval, without shortest-path wrap routing. Manual PWM bypasses position limits. Apply calibration or zero stops PAN; Save PAN settings also stops PAN and stores calibration, position PID, deadbands, ramp enable/rate, speed limit and overspeed enable in ESP NVS. Apply these settings first and wait for reported values before Save. Saving never stores an enabled output or target; boot remains disarmed with PWM off. PAN motion has not yet been physically calibrated or tuned.
+
+Prepared (not yet uploaded): TILT angular/position programming across a provisional 0?110 degrees at 500?2500 us, PAN remains continuous. For angular axes, Go to position maps angle directly to 500?2500 us using `servo_motion_config.h` endpoint angles; TILT zero is added back before pulse mapping. The servo internal controller owns the position loop, so continuous PID/deadband and continuous sweeps are unavailable. Target ramps remain optional and configurable. Manual PWM remains direct. Refine endpoint angles after IMU measurement. Angular ramps start from the last commanded PWM; pot mapping is independent and not yet aligned to mechanical travel.
+
+IMU TILT control (prepared, upload pending): BMI323 Y-axis planar gravity angle plus gyro complementary filtering, unwrapped across 90/180 degrees. X roll is selectable. The moving IMU supplies angle/velocity to the angular position controller; the pot remains diagnostic. Calibrate the two PWM/IMU points using the dashboard mapping controls before Go to position is enabled. Feedforward is the calibrated angular PWM map, PID adds a bounded correction without deadband. Mapping, zero and gains currently reset on reboot; defaults are in `src/servo_motion_config.h`. Manual SERVO RAW bypasses the angle loop. Loss of IMU feedback stops angle control; disconnect/E-stop/Off stop outputs.

@@ -12,7 +12,7 @@ class RecordingTests(unittest.TestCase):
             recorder = Recorder(directory)
             scaling = [dict(m=4, b=-1) for _ in range(16)]
             recorder.start(scaling)
-            metadata = dict(device_ms=12, accel=[1, 2, 3], gpio={'46': 1})
+            metadata = dict(device_ms=12, accel=[1, 2, 3], gpio={'46': 1}, chip_temperature=dict(celsius=47.5, device_us=12000))
             started = time.perf_counter()
             for offset in range(0, 10000, 128):
                 records = [(i, 123456789000 + i * 100, 0xFFFE if i == 1 else 0xFFFF, *([2048] * 16)) for i in range(offset, min(offset+128,10000))]
@@ -29,5 +29,7 @@ class RecordingTests(unittest.TestCase):
             self.assertEqual(rows[0]['ch0_scaled'], '9.0')
             self.assertEqual(rows[0]['gpio46'], '1')
             self.assertEqual(rows[0]['sensor_device_ms'], '12')
+            self.assertEqual(rows[0]['chip_temp_c'], '47.5')
+            self.assertEqual(rows[0]['chip_temp_device_us'], '12000')
             print(f'10k full-rate CSV rows: {duration:.3f}s')
             self.assertLess(duration, 1.0, 'CSV writer must keep up with 10k scans/s')

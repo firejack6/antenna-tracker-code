@@ -3,22 +3,39 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Antenna tracker · Sensor dashboard</title>
-  <link rel="stylesheet" href="/style.css"><script src="/channel-scaling.js" defer></script><script src="/app.js" defer></script>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <script src="/vendor/leaflet/leaflet.js" defer></script><script src="/device-map.js" defer></script>
+  <link rel="stylesheet" href="/style.css"><script src="/channel-scaling.js" defer></script><script src="/orientation.js" defer></script><script src="/app.js" defer></script>
 </head>
 <body>
 <header><div><div class="eyebrow">ANTENNA TRACKER / TELEMETRY</div><h1>Sensor dashboard<span class="pulse">●</span></h1><p>ADS7953 · BMI323 · BMM350</p></div><div class="header-right"><span id="status" class="badge">Disconnected</span><div id="freshness">No samples received</div></div></header>
 <main>
   <section class="panel connection" aria-label="Connection settings">
     <form id="connection-form">
-      <label>Source<select id="mode"><option value="remote">PlatformIO remote</option><option value="direct">Direct USB serial</option><option value="demo">Demo · simulated data</option></select></label>
+      <label>Source<select id="mode"><option value="tcp">Wi-Fi TCP</option><option value="demo">Demo · simulated data</option><optgroup id="debug-sources" label="Debug only" hidden><option value="remote">PlatformIO remote</option><option value="direct">Direct USB serial</option></optgroup></select></label>
+      <label class="inline"><input id="show-debug-sources" type="checkbox"> Show debug sources (USB / PlatformIO remote)</label>
+      <label class="inline"><input id="telemetry-lean" type="checkbox" disabled> Lean telemetry (status only · quieter Wi‑Fi)</label>
       <label id="agent-field">Remote agent<input id="agent" value="desktop-o1gdd79" maxlength="200" required></label>
-      <label id="port-field">Serial port<input id="port" list="ports" placeholder="Find ports or enter COM port" maxlength="250"><datalist id="ports"></datalist></label>
+      <label id="port-field"><span id="port-label">ESP address</span><input id="port" list="ports" placeholder="192.168.20.1:9000" maxlength="250"><datalist id="ports"></datalist></label>
       <label id="baud-field">Baud rate<input id="baud" type="number" value="115200" min="300" max="4000000" required></label>
       <div class="buttons"><button id="find" type="button" class="secondary">Find ports</button><button id="connect" type="submit">Connect</button><button id="disconnect" type="button" class="secondary">Disconnect</button></div>
     </form>
     <p id="source-hint">Connect through your running PlatformIO agent. Close any other monitor using the same port.</p>
     <p id="connection-message" role="status">Choose a source to start streaming.</p><p id="notice" role="alert"></p>
   </section>
+  <section class="panel health-panel" aria-label="Connection health"><div class="section-heading"><div><div class="eyebrow">LIVE TRANSPORT</div><h2>Connection health</h2></div><span id="link-state" class="badge">Waiting for ADC</span></div><div class="health-grid">
+    <div><small>Last valid ADC batch</small><strong id="link-age">—</strong></div>
+    <div><small>ADC receive rate · last 10 s</small><strong id="link-throughput">—</strong></div>
+    <div><small>Sequence gaps detected · last 10 s</small><strong id="link-gaps">—</strong></div>
+    <div><small>ESP ADC buffer · estimated delay</small><strong id="link-buffer">—</strong></div>
+    <div><small>TCP stalls / failed writes · since ESP boot</small><strong id="link-stalls">—</strong></div>
+    <div><small>TCP reconnects · dashboard session</small><strong id="link-reconnects">0</strong></div>
+    <div><small>ADC delivery gaps over 100 ms</small><strong id="link-dropouts">0</strong></div>
+    <div><small>Longest delivery interval</small><strong id="link-longest-gap">—</strong></div>
+    <div><small>Current / last dropout</small><strong id="link-last-gap">—</strong></div>
+    <div><small>ESP32-S3 chip temperature · 5 Hz</small><strong id="chip-temperature">Waiting for temperature</strong></div>
+  </div><p id="dropout-log-status">Dropout logging starts when connected to hardware.</p><div class="buttons"><button id="dropout-view" type="button" class="secondary">View dropout log</button><a id="dropout-download" href="/api/dropouts/download" download hidden>Download dropout CSV</a><a id="temperature-download" href="/api/temperature/download" download hidden>Download temperature CSV</a></div><p id="temperature-log-status"></p><div id="dropout-viewer" hidden><p id="dropout-viewer-status" role="status">Loading events…</p><div class="dropout-table-scroll"><table><thead><tr><th>Gap #</th><th>Event</th><th>UTC</th><th>Last ADC batch UTC</th><th>Gap duration</th></tr></thead><tbody id="dropout-events"></tbody></table></div></div><p class="plot-note">Every interval over 100 ms between valid ADC batches counts once. Ongoing outages are logged before recovery. Monitoring continues with the browser closed and CSV recording off; the PC and relay must stay awake. Counts reset on a new Connect; previous logs remain on disk.</p>
+  <p class="plot-note">Sequence gaps include missed ADC deadlines and discarded data; they do not measure Wi-Fi packet loss. Buffer delay is estimated from queued scans and the reported acquisition rate. TCP stalls count writes that waited for socket space.</p></section>
   <div class="toolbar"><div><span id="sample-count">0 samples</span><span class="divider">/</span><span id="uptime">Device time —</span></div><div class="buttons"><label class="inline">Plot window<select id="window"><option value="15">15 seconds</option><option value="30" selected>30 seconds</option><option value="60">60 seconds</option></select></label><button id="export" class="secondary">Export CSV</button></div></div>
   <section class="panel recording-panel"><div class="section-heading"><div><div class="eyebrow">CSV RECORDING</div><h2>Save stream to disk</h2></div></div><div class="buttons"><button id="record-start" type="button">Start stream to CSV</button><button id="record-stop" type="button" class="secondary" disabled>Stop stream</button><a id="record-download" hidden>Download CSV</a></div><p id="record-status" role="status">Live viewing continues with recording off.</p><p id="record-message" role="status"></p></section>
   <section class="panel sampling-panel"><div class="section-heading"><div><div class="eyebrow">ACQUISITION</div><h2>Sampling and sensor ranges</h2></div><a id="adc-export" href="/api/adc-export" download>Export buffered raw ADC</a></div><p id="acquisition-status">Waiting for acquisition statistics</p><form id="ranges-form"><div class="buttons"><label>Acceleration range<select id="accel-range"><option value="2">±2 g</option><option value="4">±4 g</option><option value="8" selected>±8 g</option><option value="16">±16 g</option></select></label><label>Gyro range<select id="gyro-range"><option value="125">±125 °/s</option><option value="250">±250 °/s</option><option value="500">±500 °/s</option><option value="1000">±1000 °/s</option><option value="2000" selected>±2000 °/s</option></select></label><button id="apply-ranges" type="submit" disabled>Apply ranges</button><span class="unit">BMM350: fixed ±2000 µT</span></div></form><p id="ranges-reported">Waiting for range telemetry</p><p id="ranges-message" role="status"></p></section>
@@ -31,7 +48,7 @@
     <div id="adc-grid" class="adc-grid"></div>
     <div class="plot-heading"><span>Channel history · toggle traces below</span><label class="inline">Show only<select id="adc-channel"></select></label></div>
     <div id="adc-legend" class="trace-legend" aria-label="ADC graph traces"></div>
-    <p class="plot-note">Selected traces share an auto-scaled Y axis. Units appear in the legend. Click channel cards or legend entries to add/remove traces.</p>
+    <p class="plot-note">Selected traces share an auto-scaled Y axis with a 5-second hold before gradual contraction. The line shows pixel-averaged batch means; the shaded band preserves min/max excursions. Units appear in the legend. Click channel cards or legend entries to add/remove traces.</p>
     <canvas id="adc-chart" aria-label="Selected ADC channel over time" role="img"></canvas>
     <details class="scaling-settings"><summary>Channel scaling: y = m × volts + b</summary>
       <p>Applied to the cards and history in scaled display mode. Saved in this browser.</p>
@@ -42,17 +59,23 @@
     </details>
   </section>
   <section class="panel digital-panel"><div class="section-heading"><div><div class="eyebrow">DIGITAL INPUTS</div><h2>GPIO states</h2></div><span class="unit">HIGH / LOW</span></div><div id="gpio-grid" class="gpio-grid"></div></section>
+  <section class="panel orientation-panel"><div class="section-heading"><div><div class="eyebrow">BMI323 / BMM350</div><h2>Orientation estimate</h2></div><span id="orientation-state" class="badge">Waiting</span></div><div id="orientation-values" class="axis-values"></div><canvas id="orientation-indicator" role="img" aria-label="Sensor roll pitch and magnetic heading"></canvas><p class="plot-note">Sensor axes: +X forward, +Y right, +Z up at rest. Tilt comes from gravity; heading is tilt compensated and magnetic. Acceleration, magnetic interference and mounting direction affect the estimate. No gyro fusion or magnetic calibration is applied.</p></section>
   <div class="imu-grid">
     <section class="panel servo-panel"><div class="section-heading"><div><div class="eyebrow">PWM OUTPUTS</div><h2>Servo controls</h2></div></div><div class="buttons servo-safety"><button id="servo-enable" type="button" disabled>Enable servos</button><button id="servo-disable" type="button" class="secondary" disabled>Disable servos</button><button id="servo-estop" type="button" class="estop" disabled>E-STOP</button><button id="servo-clear" type="button" class="secondary" disabled>Clear E-stop</button></div><p id="servo-safety-state" role="status">Servo state unconfirmed</p><p id="servo-safety-message" role="status"></p><p>Enable servos, then set pulse width and frequency and click Command. Disable and E-stop switch all PWM outputs off. E-stop stays latched until cleared; clearing leaves servos disabled. This software stop requires a working board connection and does not cut servo power.</p><div id="servo-controls"></div><p id="servo-message" role="status"></p></section>
     <section class="panel feedback-panel"><div class="section-heading"><div><div class="eyebrow">CH5 / CH6 / CH7</div><h2>Servo feedback</h2></div><span id="feedback-units" class="unit"></span></div><div class="feedback-legend"><span>S3 FB · CH5</span><span>PAN FB · CH6</span><span>TILT FB · CH7</span></div><canvas id="feedback-chart" aria-label="S3 PAN and TILT feedback over time" role="img"></canvas></section>
   </div>
+  <section class="panel pid-panel"><div class="section-heading"><div><div class="eyebrow">SERVO CONTROL</div><h2>PID and position</h2></div><label class="inline">Servo<select id="pid-axis"><option value="TILT">TILT · CH7</option><option value="PAN">PAN · CH6</option></select></label></div><p id="pid-state" role="status">Waiting for controller telemetry</p>
+    <div class="pid-plots"><div><h3>Speed · deg/s</h3><div id="pid-speed-legend" class="trace-legend"></div><canvas id="pid-speed-chart" aria-label="Requested and measured servo speed over time" role="img"></canvas></div>
+    <div><h3>Position · degrees</h3><div id="pid-position-legend" class="trace-legend"></div><canvas id="pid-position-chart" aria-label="Servo position and angle limits over time" role="img"></canvas></div>
+    <div><h3>PID output · µs from neutral</h3><div id="pid-output-legend" class="trace-legend"></div><canvas id="pid-output-chart" aria-label="PID contributions and PWM offset over time" role="img"></canvas></div></div>
+    <p class="plot-note">All plots use the history window above and controller timestamps. Click legends to toggle traces. Feedforward includes deadband compensation; D is zero. Position lines break at the pot wrap. PWM output is shown as offset from neutral; OFF is zero.</p></section>
   <div class="imu-grid">
     <section class="panel"><div class="section-heading"><div><div class="eyebrow">BMI323</div><h2>Acceleration</h2></div><span class="unit">g</span></div><div id="accel-values" class="axis-values"></div><canvas id="accel-chart" aria-label="Acceleration X Y Z over time" role="img"></canvas></section>
     <section class="panel"><div class="section-heading"><div><div class="eyebrow">BMI323</div><h2>Angular velocity</h2></div><span class="unit">°/s</span></div><div id="gyro-values" class="axis-values"></div><canvas id="gyro-chart" aria-label="Gyroscope X Y Z over time" role="img"></canvas></section>
     <section class="panel"><div class="section-heading"><div><div class="eyebrow">BMM350</div><h2>Magnetic field</h2></div><span class="unit">µT</span></div><div id="mag-values" class="axis-values"></div><canvas id="mag-chart" aria-label="Magnetic field X Y Z over time" role="img"></canvas></section>
   </div>
   <p id="sensor-errors" role="status"></p>
-  <section class="panel"><div class="section-heading"><div><div class="eyebrow">SERIAL OUTPUT</div><h2>Raw monitor</h2></div><label class="inline"><input id="follow" type="checkbox" checked> Auto-scroll</label></div><pre id="log" tabindex="0" aria-label="Raw serial monitor">Waiting for a connection…</pre></section>
+  <section class="panel"><div class="section-heading"><div><div class="eyebrow">CONNECTION OUTPUT</div><h2>Raw monitor</h2></div><div class="buttons"><button id="raw-pause" type="button" class="secondary">Pause monitor</button><label class="inline"><input id="follow" type="checkbox" checked> Auto-scroll</label></div></div><p>Telemetry text updates once per second; commands and errors are retained.</p><pre id="log" tabindex="0" aria-label="Raw connection monitor">Waiting for a connection…</pre></section>
   <footer><span>Local telemetry and servo control</span><span id="retention">10,000 plot summaries · 2,048 raw ADC batches · CSV exports summaries</span></footer>
 </main>
 </body></html>

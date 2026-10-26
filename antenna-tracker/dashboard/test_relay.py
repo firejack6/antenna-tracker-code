@@ -154,7 +154,7 @@ class LifecycleTests(unittest.TestCase):
                         {'axis': 'PAN', 'pulse': 1500, 'frequency': 51},
                         {'axis': 'PAN', 'pulse': True, 'frequency': 50}]:
                 with self.assertRaises(ValueError): relay.command_servo(bad)
-            relay.command_servo({'axis': 'PAN', 'pulse': 1750, 'frequency': 50})
+            relay.command_servo({'axis': 'PAN', 'pulse': 1750, 'frequency': 50, 'continuous': True})
             wait_for(lambda: relay.snapshot()['latest']['servos']['PAN']['pulse'] == 1750)
             self.assertEqual(relay.snapshot()['latest']['servos']['PAN']['enable'], 1)
             self.assertEqual(relay.snapshot()['latest']['servos']['TILT']['enable'], 0)
@@ -309,7 +309,7 @@ class HTTPTests(unittest.TestCase):
         evil = Request(self.url + "/api/disconnect", data=b'{}', headers={"Content-Type":"application/json", "Origin":"https://example.com"})
         self.server.relay.command_safety({'action': 'ENABLE'})
         wait_for(lambda: self.server.relay.snapshot()['safety_command']['state'] == 'applied')
-        servo = Request(self.url + '/api/servo', data=b'{"axis":"TILT","pulse":1600,"frequency":50}', headers={'Content-Type': 'application/json'})
+        servo = Request(self.url + '/api/servo', data=b'{"axis":"TILT","pulse":1600,"frequency":50,"continuous":true}', headers={'Content-Type': 'application/json'})
         with urlopen(servo) as response:
             self.assertTrue(json.load(response)['ok'])
         wait_for(lambda: self.server.relay.snapshot()['latest']['servos']['TILT']['pulse'] == 1600)

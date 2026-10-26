@@ -1,0 +1,8 @@
+2026-10-10 TILT tuning
+Positive static test: 1542..1547 us stationary. Movement begins near 1548 us.
+Long trial 2: 51.469 seconds before firmware overspeed fault near upper pot range.
+Pot reached ~3.306 V then declined gradually to 2.75 V, despite commands remaining above 1500 us. Physical direction observation pending.
+Current firmware: high-resolution MCPWM TILT output, PI 0.06/0.02, deadband 47, three-sample velocity median + 20ms LPF; five-sample mapping median retained. Initial ramp 2 us/s, recovery 10 us/s, retained negative integral.
+Not yet validated as smooth. TILT output stopped; normal speed setting restored to 30 deg/s.
+
+Later live trials: fixed 1540 and 1541 us stationary for 12 s each; fixed 1542 us moved net 74.71 deg in 11.98 s, peak feedback speed 265.94 deg/s. Fixed 1543 us produced peak 694.08 deg/s and was stopped by independent bound. New defaults: positive deadband 42 us, Kp .01, Ki .005, I limit 2 us, search .1 us/s capped 1 us; negative braking trim decays with .5 s time constant during pauses after breakaway. Latest closed-loop trial stalled after a transient 10 deg feedback excursion that returned to the starting voltage. Not validated as smooth; physical observation requested to distinguish real motion from feedback jumps. TILT verified off, overspeed protection restored, normal speed limit restored to 30 deg/s.

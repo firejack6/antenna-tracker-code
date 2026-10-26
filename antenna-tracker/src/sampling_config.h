@@ -5,7 +5,17 @@
 // Rebuild/upload after editing. Range: >0 through 10000 Hz.
 extern float adcSampleHz;
 
-constexpr float ADC_SAMPLE_HZ = 10000.0f;       // Full scan of all 16 channels
+constexpr float ADC_SAMPLE_HZ = 1000.0f;       // Full scan of all 16 channels
+// ADS7953 silicon limit: 1,000,000 conversions/s TOTAL across its multiplexer,
+// not per channel. All 16 channels with no discards: 62,500 readings/channel/s.
+// Retained limit with N consecutive and D discarded: 62,500 * (N-D)/N;
+// N=10,D=2 gives 50,000 retained readings/channel/s at the chip's rated limit.
+// Our 16 MHz SPI + 1 us CS-high quiet time needs >=2 us/conversion, so its
+// wire-time ceiling is 500,000 conversions/s, or 25,000 retained/channel/s
+// with N=10,D=2. SPI calls, GPIO, scheduling and transport lower actual rates.
+// The firmware currently accepts ADC_SAMPLE_HZ <=10,000; these are ceilings,
+// not supported settings or a measured throughput guarantee.
+// TI reference: https://www.ti.com/product/ADS7953
 // Consecutive conversions per channel before advancing (1..64).
 // Each channel gets this many total conversions per burst. Larger counts
 // increase burst time and may require lowering ADC_SAMPLE_HZ.
@@ -30,3 +40,4 @@ static_assert(ADC_SPI_HZ > 0 && ADC_SPI_HZ <= 20000000 &&
 static_assert(ADC_QUIET_US >= 1 && ADC_QUIET_US <= 100,
               "ADC quiet time must be 1..100 us");
 constexpr uint32_t TELEMETRY_HZ = 20; // I2C/GPIO/PWM status; ADC batches are independent.
+constexpr uint32_t CHIP_TEMPERATURE_HZ = 5; // ESP32-S3 internal temperature, not ambient.

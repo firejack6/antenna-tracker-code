@@ -67,6 +67,7 @@ class Recorder:
         header += [f'ch{i}_{kind}' for kind in ('raw', 'volts', 'scaled') for i in range(16)]
         header += [f'{kind}_{axis}' for kind in ('accel_g', 'gyro_dps', 'mag_uT') for axis in ('x', 'y', 'z')]
         header += ['gpio46', 'gpio4', 'gpio13', 'gpio14']
+        header += ['chip_temp_c', 'chip_temp_device_us']
         try:
             with output:
                 writer = csv.writer(output)
@@ -83,12 +84,14 @@ class Recorder:
                     sensor = [metadata.get('device_ms', '')]
                     imu = [value for kind in ('accel', 'gyro', 'mag') for value in (metadata.get(kind) or ['', '', ''])]
                     gpio = [metadata.get('gpio', {}).get(str(i), metadata.get('gpio', {}).get(i, '')) for i in (46, 4, 13, 14)]
+                    temperature = metadata.get('chip_temperature') or {}
+                    temp = [temperature.get('celsius') if temperature.get('celsius') is not None else '', temperature.get('device_us', '')]
                     rows = []
                     for sequence, stamp, valid, *counts in records:
                         raw = [value if valid & (1 << i) and value <= 4095 else '' for i, value in enumerate(counts)]
                         volts = [value * 5.0 / 4096 if value != '' else '' for value in raw]
                         scaled = [value * self.scaling[i][0] + self.scaling[i][1] if value != '' else '' for i, value in enumerate(volts)]
-                        rows.append([utc, stamp, sequence, valid, *sensor, *raw, *volts, *scaled, *imu, *gpio])
+                        rows.append([utc, stamp, sequence, valid, *sensor, *raw, *volts, *scaled, *imu, *gpio, *temp])
                     writer.writerows(rows)
                     with self.lock: self.rows += len(rows)
         except Exception as exc:

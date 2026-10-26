@@ -1,11 +1,13 @@
-"""Mixed text / CRC32-framed ADC transport. Standard library only."""
+"""Mixed text / CRC32-framed ADC + ATS1 status transport. Standard library only."""
 import struct
 import zlib
 
 MAGIC = b'\x00ATB1'
 MAGIC2 = b'\x00ATB2'
+MAGIC_STATUS = b'\x00ATS1'
 SCAN = struct.Struct('<IQH16H')  # sequence, 64-bit device microseconds, valid, raw
 MAX_PAYLOAD = 14 + 128 * 30
+MAX_STATUS_PAYLOAD = 4096
 
 def decode(payload, version):
     count = struct.unpack_from('<H', payload)[0]
@@ -27,18 +29,20 @@ def decode(payload, version):
 
 
 class Stream:
-    def __init__(self, line, batch, corrupt):
-        self.line, self.batch, self.corrupt = line, batch, corrupt
+    def __init__(self, line, batch, corrupt, status=None):
+        self.line, self.batch, self.corrupt, self.status = line, batch, corrupt, status
         self.pending = bytearray()
 
     def feed(self, chunk):
         self.pending.extend(chunk)
         while self.pending:
-            if self.pending.startswith((MAGIC, MAGIC2)):
+            if self.pending.startswith((MAGIC, MAGIC2, MAGIC_STATUS)):
                 if len(self.pending) < 7:
                     return
                 size = struct.unpack_from('<H', self.pending, 5)[0]
-                if not 2 <= size <= MAX_PAYLOAD:
+                is_status = self.pending.startswith(MAGIC_STATUS)
+                max_size = MAX_STATUS_PAYLOAD if is_status else MAX_PAYLOAD
+                if not 2 <= size <= max_size:
                     del self.pending[0]
                     self.corrupt()
                     continue
@@ -49,16 +53,21 @@ class Stream:
                 checksum = struct.unpack_from('<I', self.pending, 7 + size)[0]
                 try:
                     if zlib.crc32(payload) != checksum: raise ValueError('CRC mismatch')
-                    records = decode(payload, 1 if self.pending[4] == 49 else 2)
+                    if is_status:
+                        if self.status:
+                            self.status(payload)
+                    else:
+                        records = decode(payload, 1 if self.pending[4] == 49 else 2)
                 except (ValueError, struct.error):
                     del self.pending[0]
                     self.corrupt()
                     continue
                 packet = bytes(self.pending[:total])
                 del self.pending[:total]
-                self.batch(records, packet)
+                if not is_status:
+                    self.batch(records, packet)
                 continue
-            markers = [position for magic in (MAGIC, MAGIC2) if (position := self.pending.find(magic)) >= 0]
+            markers = [position for magic in (MAGIC, MAGIC2, MAGIC_STATUS) if (position := self.pending.find(magic)) >= 0]
             marker = min(markers, default=-1)
             newline = self.pending.find(b'\n')
             if newline >= 0 and (marker < 0 or newline < marker):

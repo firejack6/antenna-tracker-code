@@ -1,0 +1,81 @@
+{
+  "status": "connected",
+  "message": "TCP \u00b7 192.168.20.1:9000",
+  "mode": "tcp",
+  "servo_safety": null,
+  "safety_command": null,
+  "servo_inhibit": true,
+  "servo_commands": {},
+  "recording": {
+    "active": false,
+    "finishing": false,
+    "rows": 0,
+    "error": "",
+    "filename": null,
+    "path": null
+  },
+  "dropouts": {
+    "count": 0,
+    "threshold_ms": 100,
+    "active": false,
+    "current_gap_ms": 0,
+    "longest_gap_ms": 0,
+    "last_gap_ms": 0,
+    "filename": "dropouts-20261011-041335-805389.csv",
+    "path": "C:\\Users\\jacks\\Documents\\GitHub\\antenna-tracker-code\\antenna-tracker\\dashboard\\health-logs\\dropouts-20261011-041335-805389.csv",
+    "error": null,
+    "running": true
+  },
+  "temperature": null,
+  "temperature_log": {
+    "rows": 0,
+    "error": null,
+    "running": true,
+    "filename": "temperature-20261011-041335-805389.csv",
+    "path": "C:\\Users\\jacks\\Documents\\GitHub\\antenna-tracker-code\\antenna-tracker\\dashboard\\health-logs\\temperature-20261011-041335-805389.csv"
+  },
+  "session": 1,
+  "cursor": 5,
+  "acquisition": {
+    "raw_scans": 0,
+    "sequence_gaps": 0,
+    "clock_offset": null,
+    "received_hz": 0,
+    "data_age_ms": null,
+    "recent_window_s": 10,
+    "received_hz_10s": 0.0,
+    "adc_kbytes_s_10s": 0.0,
+    "recent_gaps": 0,
+    "recent_gap_percent": 0,
+    "reconnects": 2,
+    "corrupt_packets": 0,
+    "raw_batches": 0,
+    "tcp_receive_age_ms": null,
+    "tcp_max_receive_gap_ms": 0,
+    "tcp_max_decode_ms": 0
+  },
+  "samples": [],
+  "logs": [
+    {
+      "id": 1,
+      "text": "Connecting TCP telemetry to 192.168.20.1:9000"
+    },
+    {
+      "id": 2,
+      "text": "ESP TCP connection closed"
+    },
+    {
+      "id": 3,
+      "text": "Connecting TCP telemetry to 192.168.20.1:9000"
+    },
+    {
+      "id": 4,
+      "text": "ESP TCP connection closed"
+    },
+    {
+      "id": 5,
+      "text": "Connecting TCP telemetry to 192.168.20.1:9000"
+    }
+  ],
+  "latest": null
+}

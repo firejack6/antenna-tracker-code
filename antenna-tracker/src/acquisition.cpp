@@ -2,16 +2,23 @@
 #include <SPI.h>
 #include <driver/gpio.h>
 #include <esp_timer.h>
+#include <esp_heap_caps.h>
 #include "acquisition.h"
 #include "sampling_config.h"
 #include "adc_sequence.h"
 #include "channel_scaling.h"
 #include "current_readings.h"
 #include "servo_control.h"
+#include "network_transport.h"
+#include "servo_feedback.h"
+#include "tilt_calibration.h"
 
 namespace {
-constexpr uint32_t CAPACITY = 4096, BATCH = 128;
-AdcScan ring[CAPACITY], latest = {};
+constexpr uint32_t BATCH = 128;
+uint32_t capacity = 4096; // ~0.4 seconds at 10 kHz, stored in Nano PSRAM.
+AdcScan *ring = nullptr;
+AdcScan latest = {};
+ServoFeedback feedback;
 constexpr uint32_t KEPT_READINGS = ADC_CONSECUTIVE_READINGS - ADC_DISCARDED_READINGS;
 AdcScan burst[KEPT_READINGS];
 uint32_t head = 0, tail = 0;
@@ -88,17 +95,37 @@ void adcTask(void *) {
     output3v3CurrentAmps = scan.valid & (1 << 12) ? adcToScaled(scan.raw[12], 12) : NAN;
     output3v3VoltageVolts = scan.valid & (1 << 11) ? adcToScaled(scan.raw[11], 11) : NAN;
     const uint32_t duration = esp_timer_get_time() - started;
+    ServoFeedback nextFeedback;
+    float panSum = 0, tiltSum = 0; unsigned panCount = 0, tiltCount = 0;
+    for (const auto &reading : burst) {
+      if (reading.valid & (1 << 6)) { panSum += adcToVolts(reading.raw[6]); ++panCount; }
+      if (reading.valid & (1 << 7)) { tiltSum += adcToVolts(reading.raw[7]); ++tiltCount; }
+    }
+    nextFeedback.panVolts = panCount ? panSum / panCount : NAN;
+    nextFeedback.tiltVolts = tiltCount ? tiltSum / tiltCount : NAN;
+    nextFeedback.panDegrees = feedbackDeviceDegrees(nextFeedback.panVolts, panFeedbackTurns, panGearRatio);
+    nextFeedback.tiltDegrees = tiltAngleFromVolts(nextFeedback.tiltVolts, getTiltCalibration());
+    nextFeedback.deviceUs = scan.deviceUs;
+    uint32_t invalid = 0;
+    for (const AdcScan &reading : burst) {
+      if (reading.valid != (activeChannel < 0 ? 0xFFFF : (1 << activeChannel))) ++invalid;
+    }
+    // Single producer owns head, single consumer owns tail. Do not overwrite
+    // unread slots: their payload can then be copied without a cross-core lock.
     portENTER_CRITICAL(&mux);
-    latest = scan; appliedChannel = activeChannel; stats.scans += KEPT_READINGS; stats.missedTicks += ticks - 1;
+    const uint32_t writeHead = head;
+    const uint32_t freeSlots = capacity - (head - tail);
+    portEXIT_CRITICAL(&mux);
+    const uint32_t retained = freeSlots < KEPT_READINGS ? freeSlots : KEPT_READINGS;
+    for (uint32_t i = 0; i < retained; ++i) ring[(writeHead + i) % capacity] = burst[i];
+    portENTER_CRITICAL(&mux);
+    head = writeHead + retained; // Publish only after all payload writes finish.
+    latest = scan; appliedChannel = activeChannel; stats.scans += KEPT_READINGS;
+    feedback = nextFeedback;
+    stats.missedTicks += ticks - 1; stats.invalidScans += invalid;
+    stats.ringDrops += KEPT_READINGS - retained;
     if (duration > stats.maxScanUs) stats.maxScanUs = duration;
     portEXIT_CRITICAL(&mux);
-    for (const AdcScan &reading : burst) {
-      portENTER_CRITICAL(&mux);
-      if (reading.valid != (activeChannel < 0 ? 0xFFFF : (1 << activeChannel))) ++stats.invalidScans;
-      if (head - tail == CAPACITY) { ++tail; ++stats.ringDrops; }
-      ring[head++ % CAPACITY] = reading;
-      portEXIT_CRITICAL(&mux);
-    }
     // An overloaded timer can leave notifications permanently pending. Allow
     // core 1's idle task to run even then, preventing watchdog reset loops.
     if (activeChannel >= 0 || ++burstsSinceYield >= 32) {
@@ -115,6 +142,13 @@ uint32_t crc32(const uint8_t *data, size_t size) {
 }
 
 bool startAdcAcquisition() {
+  ring = static_cast<AdcScan *>(heap_caps_malloc(capacity * sizeof(AdcScan), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!ring) {
+    capacity = 2048; // Keep room for Wi-Fi on hardware without enabled PSRAM.
+    ring = static_cast<AdcScan *>(heap_caps_malloc(capacity * sizeof(AdcScan), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  }
+  if (!ring) return false;
+  Serial.printf("ADC buffer: %lu readings\n", (unsigned long)capacity);
   for (uint32_t i = 0; i < 256; ++i) {
     uint32_t value = i;
     for (int bit = 0; bit < 8; ++bit) value = (value >> 1) ^ ((value & 1) ? 0xEDB88320 : 0);
@@ -141,28 +175,36 @@ bool startAdcAcquisition() {
   return true;
 }
 
-void sendAdcBatches() {
+static bool streamAdcBatches = true;
+bool adcStreamEnabled() { return streamAdcBatches; }
+
+bool sendAdcBatches() {
   static uint8_t packet[11 + 14 + BATCH * 30];
   static uint32_t lastSend = 0;
-  // A full USB TX buffer must still be flushed by write(). Returning here
-  // when availableForWrite() is zero can starve batches behind text telemetry.
+  // Lean mode: keep sampling for servo feedback, but do not ship ATB2 on TCP.
+  if (!streamAdcBatches) {
+    portENTER_CRITICAL(&mux);
+    tail = head;
+    portEXIT_CRITICAL(&mux);
+    return false;
+  }
+  // Batch binary readings independently of the slower text status updates.
   uint16_t count = 0;
   portENTER_CRITICAL(&mux);
   const uint32_t available = head - tail;
+  const uint32_t readTail = tail;
   portEXIT_CRITICAL(&mux);
-  if (!available || (available < BATCH && uint32_t(millis() - lastSend) < 10)) return;
+  if (!available || (available < BATCH && uint32_t(millis() - lastSend) < 10)) return false;
   count = available < BATCH ? available : BATCH;
-  // Copy each scan under a short lock; never hold the lock during USB writes.
+  // Keep tail unchanged until packing finishes, reserving all unread slots.
+  // PSRAM access, packing and CRC work never run inside the shared spinlock.
   uint32_t baseSequence = 0;
   uint64_t baseUs = 0;
   for (uint16_t i = 0; i < count; ++i) {
-    portENTER_CRITICAL(&mux);
-    const AdcScan scan = ring[tail % CAPACITY];
+    const AdcScan scan = ring[(readTail + i) % capacity];
     if (i && (scan.deviceUs - baseUs > 65535 || uint32_t(scan.sequence - baseSequence) > 65535)) {
-      portEXIT_CRITICAL(&mux); count = i; break;
+      count = i; break;
     }
-    ++tail;
-    portEXIT_CRITICAL(&mux);
     if (!i) { baseSequence = scan.sequence; baseUs = scan.deviceUs; }
     uint8_t *record = packet + 21 + i * 30;
     const uint16_t sequenceDelta = scan.sequence - baseSequence, usDelta = scan.deviceUs - baseUs;
@@ -174,6 +216,9 @@ void sendAdcBatches() {
       record[8 + pair * 3] = b >> 4;
     }
   }
+  portENTER_CRITICAL(&mux);
+  tail = readTail + count; // Release slots only after their payload is packed.
+  portEXIT_CRITICAL(&mux);
   memcpy(packet, "\0ATB2", 5);
   const uint16_t length = 14 + count * 30;
   memcpy(packet + 5, &length, 2); memcpy(packet + 7, &count, 2);
@@ -181,17 +226,11 @@ void sendAdcBatches() {
   const uint32_t crc = crc32(packet + 7, length);
   memcpy(packet + 7 + length, &crc, 4);
   const size_t size = 11 + length;
-  size_t sent = 0;
-  const uint32_t started = millis();
-  while (sent < size) {
-    const size_t written = Serial.write(packet + sent, size - sent);
-    if (!written) {
-      if (uint32_t(millis() - started) > 100) break;
-      delay(1); continue;
-    }
-    sent += written;
-  }
+  // Transport already handles partial writes and its bounded stall timeout.
+  // Never try to continue a partial packet on a closed/new TCP connection.
+  const size_t sent = writeTelemetryBytes(packet, size);
   lastSend = millis();
+  return sent == size;
 }
 int adcDiagnosticChannel() {
   portENTER_CRITICAL(&mux); const int channel = appliedChannel; portEXIT_CRITICAL(&mux);
@@ -199,17 +238,31 @@ int adcDiagnosticChannel() {
 }
 bool handleAdcCommand(const char *line) {
   if (strncmp(line, "ADC", 3)) return false;
+  if (!strcmp(line, "ADC STREAM OFF") || !strcmp(line, "ADC STREAM 0")) {
+    streamAdcBatches = false;
+    portENTER_CRITICAL(&mux); tail = head; portEXIT_CRITICAL(&mux);
+    queueControlMessage("ADC stream off (lean); local sampling continues"); return true;
+  }
+  if (!strcmp(line, "ADC STREAM ON") || !strcmp(line, "ADC STREAM 1")) {
+    streamAdcBatches = true;
+    queueControlMessage("ADC stream on"); return true;
+  }
   int channel = -1, end = 0;
   if (!strcmp(line, "ADC CHANNEL ALL")) channel = -1;
   else if (sscanf(line, "ADC CHANNEL %d %n", &channel, &end) != 1 || line[end] || channel < 0 || channel > 15) {
-    queueControlMessage("ADC error: expected ADC CHANNEL 0..15 or ALL"); return true;
+    queueControlMessage("ADC error: expected ADC CHANNEL 0..15 or ALL, or ADC STREAM ON/OFF"); return true;
   }
   portENTER_CRITICAL(&mux); requestedChannel = channel; portEXIT_CRITICAL(&mux);
   return true;
 }
 AcquisitionStats acquisitionStats() {
-  portENTER_CRITICAL(&mux); const auto value = stats; portEXIT_CRITICAL(&mux); return value;
+  portENTER_CRITICAL(&mux);
+  auto value = stats; value.queued = head - tail; value.capacity = capacity;
+  portEXIT_CRITICAL(&mux); return value;
 }
 void latestAdcScan(AdcScan &scan) {
   portENTER_CRITICAL(&mux); scan = latest; portEXIT_CRITICAL(&mux);
+}
+ServoFeedback latestServoFeedback() {
+  portENTER_CRITICAL(&mux); const auto value = feedback; portEXIT_CRITICAL(&mux); return value;
 }
