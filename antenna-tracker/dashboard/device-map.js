@@ -46,6 +46,8 @@ const deviceMap = (() => {
       <p class="plot-note">Align does not move servos — it teaches the map where the dish is pointing. Go-to/Circle/Rocket/Replay send <strong>TRACK TARGET lat lon alt only</strong>. Save pushes TRACK HOME to the board. Angle targets are Tune-only. Speed/gains/feedback stay whatever you last set in Tune. Flight replay uses each file’s native timestamps (no 10&nbsp;Hz resample).</p>
       <div class="map-fields track-fields">
         <label class="track-flight-select">Flight<select id="track-flight"><option value="">Loading…</option></select></label>
+        <label class="map-check"><input id="track-predict" type="checkbox" checked> Predict (lead target)</label>
+        <label>Lead (s)<input id="track-lead" type="number" min="0" max="2.5" step="0.05" value="0.35" title="Extra prediction lead. Board also adds ~0.15s latency + half the GPS interval."></label>
         <label>Target altitude AGL (m)<input id="track-altitude" type="number" min="0" max="100000" step="any" value="500" title="Same AGL frame as device altitude. El uses (target − device)."></label>
         <label>Circle radius (m)<input id="track-radius" type="number" min="10" max="100000" step="any" value="1000"></label>
         <label>Circle rate (°/s)<input id="track-circle-rate" type="number" min="0.1" max="90" step="any" value="6"></label>
@@ -82,14 +84,14 @@ const deviceMap = (() => {
         <canvas id="map-distance-chart" class="chart-hoverable" role="img" aria-label="Rocket horizontal range and altitude versus time"></canvas>
       </div>
       <div>
-        <h3>Azimuth <small>actual · target</small></h3>
-        <div class="mini-legend"><span style="color:#ef3038">Az actual</span><span style="color:#f5bd4f">Az target</span></div>
-        <canvas id="map-az-chart" class="chart-hoverable" role="img" aria-label="Tracker actual and target azimuth versus time"></canvas>
+        <h3>Azimuth <small>dish · GPS target · predicted</small></h3>
+        <div class="mini-legend"><span style="color:#ef3038">Az dish</span><span style="color:#f5bd4f">Az GPS</span><span style="color:#61e2bd">Az predict</span></div>
+        <canvas id="map-az-chart" class="chart-hoverable" role="img" aria-label="Dish, GPS target, and predicted azimuth versus time"></canvas>
       </div>
       <div>
-        <h3>Elevation <small>actual · target</small></h3>
-        <div class="mini-legend"><span style="color:#69adff">El actual</span><span style="color:#a88bfa">El target</span></div>
-        <canvas id="map-el-chart" class="chart-hoverable" role="img" aria-label="Tracker actual and target elevation versus time"></canvas>
+        <h3>Elevation <small>dish · GPS target · predicted</small></h3>
+        <div class="mini-legend"><span style="color:#69adff">El dish</span><span style="color:#a88bfa">El GPS</span><span style="color:#61e2bd">El predict</span></div>
+        <canvas id="map-el-chart" class="chart-hoverable" role="img" aria-label="Dish, GPS target, and predicted elevation versus time"></canvas>
       </div>
     </div>`;
   tabs.after(panel);
@@ -118,6 +120,13 @@ const deviceMap = (() => {
   }
   function dishAzimuth() {
     return magMapAzimuth();
+  }
+  /** Board PAN position target → true/map azimuth (same convention as TRACK). */
+  function trueAzFromPanCmd(panCmd) {
+    if (!config || !Number.isFinite(panCmd)) return null;
+    if (panFb === 'MAG') return wrap360(panCmd + (config.magDeclination || 0));
+    if (config.panInvert) return wrap360((config.panAlign || 0) - panCmd);
+    return wrap360(panCmd + (config.panAlign || 0));
   }
   function potDishAzimuth() {
     if (!config || !Number.isFinite(panAngle)) return null;
@@ -177,6 +186,14 @@ const deviceMap = (() => {
     const altChanged = Math.abs(altM - lastCommandedAlt) >= minAlt;
     return moved || altChanged;
   }
+  async function pushTrackPredict() {
+    const enabled = !!el('track-predict')?.checked;
+    const lead = el('track-lead')?.valueAsNumber;
+    await trackApi('track-predict', { enabled });
+    if (Number.isFinite(lead)) await trackApi('track-lead', { lead });
+    localStorage.setItem('track-predict', enabled ? '1' : '0');
+    if (Number.isFinite(lead)) localStorage.setItem('track-lead', String(lead));
+  }
   async function pushTrackHome(cfg = config, force = false) {
     if (!cfg) throw Error('Save a device location first.');
     const key = [cfg.lat, cfg.lon, cfg.alt || 0, cfg.magDeclination || 0, cfg.panAlign || 0, !!cfg.panInvert].join('|');
@@ -188,6 +205,7 @@ const deviceMap = (() => {
       pan_invert: !!cfg.panInvert,
     });
     homePushedKey = key;
+    try { await pushTrackPredict(); } catch { /* predict optional until board flashed */ }
   }
   async function commandTarget(lat, lon, altM, opts = {}) {
     // Tracking speaks geography only — SERVO POSITION angles are Tune-only.
@@ -477,14 +495,19 @@ const deviceMap = (() => {
     if (!lastAim || !Number.isFinite(lastAim.lat)) return;
     const t = performance.now() / 1000;
     const dish = dishAzimuth();
+    const azPredict = trueAzFromPanCmd(panTarget);
+    // TILT telemetry is displayAngle-flipped to elevation-up (same as lastAim.el).
+    const elPredict = Number.isFinite(target) ? target : null;
     trackHist.push({
       t,
       range: Number.isFinite(lastAim.range) ? lastAim.range : null,
       alt: Number.isFinite(lastAim.altM) ? lastAim.altM : null,
       azActual: Number.isFinite(dish) ? dish : null,
       azTarget: Number.isFinite(lastAim.azTrue) ? lastAim.azTrue : null,
+      azPredict: Number.isFinite(azPredict) ? azPredict : null,
       elActual: Number.isFinite(elevation) ? elevation : null,
       elTarget: Number.isFinite(lastAim.el) ? lastAim.el : null,
+      elPredict: Number.isFinite(elPredict) ? elPredict : null,
     });
     const cutoff = t - TRACK_HIST_SPAN_S;
     while (trackHist.length && (trackHist.length > TRACK_HIST_MAX || trackHist[0].t < cutoff)) trackHist.shift();
@@ -566,24 +589,28 @@ const deviceMap = (() => {
   }
   function paintTrackPlots() {
     if (panel.hidden) return;
-    const range = [], alt = [], azA = [], azT = [], elA = [], elT = [];
+    const range = [], alt = [], azA = [], azT = [], azP = [], elA = [], elT = [], elP = [];
     for (const s of trackHist) {
       if (Number.isFinite(s.range)) range.push({ t: s.t, v: s.range });
       if (Number.isFinite(s.alt)) alt.push({ t: s.t, v: s.alt });
       if (Number.isFinite(s.azActual)) azA.push({ t: s.t, v: s.azActual });
       if (Number.isFinite(s.azTarget)) azT.push({ t: s.t, v: s.azTarget });
+      if (Number.isFinite(s.azPredict)) azP.push({ t: s.t, v: s.azPredict });
       if (Number.isFinite(s.elActual)) elA.push({ t: s.t, v: s.elActual });
       if (Number.isFinite(s.elTarget)) elT.push({ t: s.t, v: s.elTarget });
+      if (Number.isFinite(s.elPredict)) elP.push({ t: s.t, v: s.elPredict });
     }
     paintTrackChart('map-distance-chart', [range, alt], {
       colors: ['#69adff', '#f5bd4f'], labels: ['Range m', 'Alt m'], decimals: 0,
     });
-    paintTrackChart('map-az-chart', [azA, azT], {
-      colors: ['#ef3038', '#f5bd4f'], labels: ['Az actual', 'Az target'],
+    paintTrackChart('map-az-chart', [azA, azT, azP], {
+      colors: ['#ef3038', '#f5bd4f', '#61e2bd'],
+      labels: ['Az dish', 'Az GPS', 'Az predict'],
       decimals: 1, wrapBreak: 180,
     });
-    paintTrackChart('map-el-chart', [elA, elT], {
-      colors: ['#69adff', '#a88bfa'], labels: ['El actual', 'El target'],
+    paintTrackChart('map-el-chart', [elA, elT, elP], {
+      colors: ['#69adff', '#a88bfa', '#61e2bd'],
+      labels: ['El dish', 'El GPS', 'El predict'],
       decimals: 1,
     });
   }
@@ -899,6 +926,17 @@ const deviceMap = (() => {
   el('map-center').addEventListener('click', () => { if (config) { init(); map?.setView([config.lat, config.lon], map.getZoom()); } });
   panel.querySelectorAll('[data-track-mode]').forEach(button => button.addEventListener('click', () => setMode(button.dataset.trackMode)));
   el('track-run-sim').addEventListener('click', () => { startSimFlight().catch(error => setStatus(error.message)); });
+  try {
+    const savedLead = parseFloat(localStorage.getItem('track-lead'));
+    if (Number.isFinite(savedLead)) el('track-lead').value = savedLead;
+    el('track-predict').checked = localStorage.getItem('track-predict') !== '0';
+  } catch { /* ignore */ }
+  el('track-predict').addEventListener('change', () => {
+    pushTrackPredict().then(() => setStatus(`Predict ${el('track-predict').checked ? 'on' : 'off'}`)).catch(error => setStatus(error.message));
+  });
+  el('track-lead').addEventListener('change', () => {
+    pushTrackPredict().then(() => setStatus(`Lead ${el('track-lead').valueAsNumber.toFixed(2)} s`)).catch(error => setStatus(error.message));
+  });
   loadFlightList();
   el('track-stop').addEventListener('click', () => {
     stopTrack(true);

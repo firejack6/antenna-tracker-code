@@ -607,6 +607,21 @@ class Relay:
         self._queue_track_line('TRACK OFF\n')
         return dict(ok=True, message='TRACK OFF queued')
 
+    def command_track_lead(self, data):
+        lead = data.get('lead', data.get('seconds'))
+        if type(lead) not in (int, float) or not math.isfinite(lead) or not 0 <= lead <= 2.5:
+            raise ValueError('Track LEAD needs 0..2.5 seconds')
+        self._queue_track_line(f'TRACK LEAD {float(lead):g}\n')
+        return dict(ok=True, lead=float(lead))
+
+    def command_track_predict(self, data):
+        enabled = data.get('enabled', data.get('on', True))
+        if type(enabled) not in (bool, int):
+            raise ValueError('Track PREDICT needs enabled bool')
+        on = 1 if enabled else 0
+        self._queue_track_line(f'TRACK PREDICT {on}\n')
+        return dict(ok=True, enabled=bool(on))
+
     def command_servo_pwm_sweep(self, data):
         axis, action = data.get('axis'), data.get('action')
         if axis not in ('PAN', 'TILT', 'S3') or action not in ('start', 'stop'):
@@ -1459,6 +1474,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(self.server.relay.command_track_target(data))
             elif self.path == '/api/track-off':
                 self.reply(self.server.relay.command_track_off())
+            elif self.path == '/api/track-lead':
+                self.reply(self.server.relay.command_track_lead(data))
+            elif self.path == '/api/track-predict':
+                self.reply(self.server.relay.command_track_predict(data))
             else:
                 self.reply({"error": "Not found"}, 404)
         except (ValueError, TypeError) as exc:

@@ -48,6 +48,7 @@ void updateServoMotion() {
   if (lastMotionUs && now - lastMotionUs < servoMotionIntervalUs) return;
   const float dt = lastMotionUs ? fminf((now - lastMotionUs) * 1e-6f, 0.02f) : 0;
   lastMotionUs = now;
+  updateTrackPredictMotion(now);
   updatePanMagFeedback(now);
   auto fb = latestServoFeedback();
   float tiltVelocityAngle = NAN;

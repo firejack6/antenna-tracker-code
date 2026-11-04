@@ -6,6 +6,7 @@
 #include "tilt_calibration.h"
 #include "pan_mag_heading.h"
 #include "track_geo.h"
+#include "track_predict.h"
 #include <esp_timer.h>
 #include <driver/ledc.h>
 #include <driver/mcpwm.h>
@@ -94,19 +95,62 @@ bool applyPositionTarget(int i, float target, const char **error) {
   return true;
 }
 
+bool applyTrackLatLonAlt(float lat, float lon, float alt, const char **error) {
+  if (error) *error = nullptr;
+  if (!trackHome.valid) {
+    if (error) *error = "Track error: set TRACK HOME first";
+    return false;
+  }
+  const float range = fmaxf(1.f, trackHaversineM(trackHome.lat, trackHome.lon, lat, lon));
+  const float azTrue = trackBearingDeg(trackHome.lat, trackHome.lon, lat, lon);
+  const float relAlt = alt - trackHome.alt;
+  float el = atanf(relAlt / range) * 57.2957795f;
+  if (el < -5.f) el = -5.f;
+  if (el > 85.f) el = 85.f;
+  float pan;
+  if (panPositionFeedback == PanPositionFeedback::Mag) {
+    pan = trackWrap360(azTrue - trackHome.decl);
+  } else if (trackHome.panInvert) {
+    pan = trackWrap360(trackHome.panAlign - azTrue);
+  } else {
+    pan = trackWrap360(azTrue - trackHome.panAlign);
+  }
+  const float tilt = -el;
+  tiltPositionRampEnabled = true;
+  const char *err = nullptr;
+  if (!applyPositionTarget(0, pan, &err)) {
+    if (error) *error = err ? err : "Track error: PAN position failed";
+    return false;
+  }
+  if (!applyPositionTarget(1, tilt, &err)) {
+    if (error) *error = err ? err : "Track error: TILT position failed";
+    return false;
+  }
+  return true;
+}
+
+void updateTrackPredictMotion(uint64_t nowUs) {
+  if (!trackHome.valid || !trackPredict.enabled || !trackPredict.active) return;
+  float lat, lon, alt;
+  if (!trackPredictTick(nowUs, trackHome, &lat, &lon, &alt)) return;
+  applyTrackLatLonAlt(lat, lon, alt, nullptr);
+}
+
 void command(const char *line) {
   if (safetyCommand(line)) return;
   if (!strncmp(line, "TRACK ", 6)) {
     if (!strcmp(line, "TRACK OFF")) {
+      trackPredictReset();
       stopOutput(0); stopOutput(1);
       queueControlMessage("Track off"); return;
     }
-    float lat = NAN, lon = NAN, alt = NAN, decl = NAN, align = NAN; int end = 0, invert = -1;
+    float lat = NAN, lon = NAN, alt = NAN, decl = NAN, align = NAN, lead = NAN; int end = 0, invert = -1, pred = -1;
     if (sscanf(line, "TRACK HOME %f %f %f %n", &lat, &lon, &alt, &end) == 3 && end && !line[end]) {
       if (!validTrackHomeCoords(lat, lon, alt)) {
         queueControlMessage("Track error: invalid HOME lat lon alt"); return;
       }
       trackHome.lat = lat; trackHome.lon = lon; trackHome.alt = alt; trackHome.valid = true;
+      trackPredictReset();
       queueControlMessage(saveTrackHome() ? "Track HOME saved" : "Track HOME set (NVS save failed)"); return;
     }
     if (sscanf(line, "TRACK DECL %f %n", &decl, &end) == 1 && end && !line[end]) {
@@ -124,41 +168,43 @@ void command(const char *line) {
       queueControlMessage(trackHome.valid && saveTrackHome() ? "Track INVERT saved" : "Track INVERT set"); return;
     }
     end = 0;
+    if (sscanf(line, "TRACK LEAD %f %n", &lead, &end) == 1 && end && !line[end]) {
+      if (!isfinite(lead) || lead < 0.f || lead > kTrackMaxLeadS) {
+        queueControlMessage("Track error: LEAD 0..2.5 s"); return;
+      }
+      trackPredictSetLead(lead);
+      char msg[72];
+      snprintf(msg, sizeof(msg), "Track LEAD %.2fs (predict %s)", trackPredict.leadExtraS,
+               trackPredict.enabled ? "on" : "off");
+      queueControlMessage(msg); return;
+    }
+    end = 0;
+    if (sscanf(line, "TRACK PREDICT %d %n", &pred, &end) == 1 && end && !line[end] && (pred == 0 || pred == 1)) {
+      trackPredictSetEnabled(pred != 0);
+      queueControlMessage(pred ? "Track PREDICT on" : "Track PREDICT off"); return;
+    }
+    end = 0;
     if (sscanf(line, "TRACK TARGET %f %f %f %n", &lat, &lon, &alt, &end) == 3 && end && !line[end]) {
       if (!trackHome.valid) { queueControlMessage("Track error: set TRACK HOME first"); return; }
       if (!isfinite(lat) || !isfinite(lon) || !isfinite(alt) || fabsf(lat) > 90.f || fabsf(lon) > 180.f ||
           alt < 0.f || alt > 100000.f) {
         queueControlMessage("Track error: invalid TARGET lat lon alt"); return;
       }
-      const float range = fmaxf(1.f, trackHaversineM(trackHome.lat, trackHome.lon, lat, lon));
-      const float azTrue = trackBearingDeg(trackHome.lat, trackHome.lon, lat, lon);
-      const float relAlt = alt - trackHome.alt;
-      float el = atanf(relAlt / range) * 57.2957795f;
-      if (el < -5.f) el = -5.f;
-      if (el > 85.f) el = 85.f;
-      float pan;
-      if (panPositionFeedback == PanPositionFeedback::Mag) {
-        pan = trackWrap360(azTrue - trackHome.decl);
-      } else if (trackHome.panInvert) {
-        pan = trackWrap360(trackHome.panAlign - azTrue);
-      } else {
-        pan = trackWrap360(azTrue - trackHome.panAlign);
-      }
-      const float tilt = -el;
-      // TRACK updates arrive at GPS cadence; ramp tilt so soft-retargets glide.
-      tiltPositionRampEnabled = true;
+      float aimLat = lat, aimLon = lon, aimAlt = alt;
+      trackPredictOnTarget(lat, lon, alt, esp_timer_get_time(), trackHome, &aimLat, &aimLon, &aimAlt);
       const char *err = nullptr;
-      if (!applyPositionTarget(0, pan, &err)) {
-        queueControlMessage(err ? err : "Track error: PAN position failed"); return;
+      if (!applyTrackLatLonAlt(aimLat, aimLon, aimAlt, &err)) {
+        queueControlMessage(err ? err : "Track error: aim failed"); return;
       }
-      if (!applyPositionTarget(1, tilt, &err)) {
-        queueControlMessage(err ? err : "Track error: TILT position failed"); return;
-      }
-      char msg[96];
-      snprintf(msg, sizeof(msg), "Track TARGET az=%.1f el=%.1f pan=%.1f", azTrue, el, pan);
+      const float azTrue = trackBearingDeg(trackHome.lat, trackHome.lon, aimLat, aimLon);
+      const float range = fmaxf(1.f, trackHaversineM(trackHome.lat, trackHome.lon, aimLat, aimLon));
+      const float el = atanf((aimAlt - trackHome.alt) / range) * 57.2957795f;
+      char msg[112];
+      snprintf(msg, sizeof(msg), "Track TARGET az=%.1f el=%.1f lead=%.2f%s",
+               azTrue, el, trackPredict.lastLeadS, trackPredict.coasting ? " coast" : "");
       queueControlMessage(msg); return;
     }
-    queueControlMessage("Track error: expected HOME|DECL|ALIGN|INVERT|TARGET|OFF"); return;
+    queueControlMessage("Track error: expected HOME|DECL|ALIGN|INVERT|LEAD|PREDICT|TARGET|OFF"); return;
   }
   if (!strncmp(line, "PAN ", 4)) {
     if (!strcmp(line,"PAN SAVE")) {
