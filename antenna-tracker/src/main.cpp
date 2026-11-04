@@ -13,6 +13,7 @@
 #include "network_transport.h"
 #include "tilt_calibration.h"
 #include "tilt_imu.h"
+#include "pan_mag_heading.h"
 #include "status_frame.h"
 #include <math.h>
 #include <string.h>
@@ -32,10 +33,27 @@ struct SensorState {
   uint32_t bmiReads = 0, magReads = 0;
   float chipTemperatureC = NAN;
   uint64_t temperatureUs = 0;
+  uint64_t magUs = 0;
 };
 SensorState sensors;
 TiltImuSample latestTiltImu() {
   portENTER_CRITICAL(&sensorMux); const auto value = sensors.imu; portEXIT_CRITICAL(&sensorMux); return value;
+}
+MagImuSample latestMagImuSample() {
+  MagImuSample out;
+  portENTER_CRITICAL(&sensorMux);
+  const SensorState state = sensors;
+  portEXIT_CRITICAL(&sensorMux);
+  out.accelValid = state.bmiValid;
+  out.magValid = state.magValid;
+  out.deviceUs = state.magUs;
+  if (state.bmiValid) {
+    out.accel[0] = state.accel.x; out.accel[1] = state.accel.y; out.accel[2] = state.accel.z;
+  }
+  if (state.magValid) {
+    out.mag[0] = state.mag.float_x; out.mag[1] = state.mag.float_y; out.mag[2] = state.mag.float_z;
+  }
+  return out;
 }
 struct RangeRequest { int accel, gyro; };
 QueueHandle_t rangeQueue;
@@ -116,7 +134,11 @@ void i2cTask(void *) {
       state.imu = tiltFilter.sample;
     }
     state.magValid = magReady;
-    if (magReady) { state.mag = bmm350.getGeomagneticData(); ++state.magReads; }
+    if (magReady) {
+      state.mag = bmm350.getGeomagneticData();
+      state.magUs = esp_timer_get_time();
+      ++state.magReads;
+    }
     portENTER_CRITICAL(&sensorMux); sensors = state; portEXIT_CRITICAL(&sensorMux);
     // Transfers wait on I2C interrupts. Also periodically let the idle task run.
     if ((++cycles & 31) == 0 || (!bmiReady && !magReady)) vTaskDelay(1);

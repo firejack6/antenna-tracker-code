@@ -16,6 +16,7 @@
 #include "continuous_speed_control.h"
 #include <esp_timer.h>
 #include "pan_calibration.h"
+#include "track_geo.h"
 
 extern bool handleSensorCommand(const char *line);
 float panMaxSpeedDegPerSec = panDefaultMaxSpeedDegPerSec;
@@ -36,8 +37,19 @@ float panPositionRampDegPerSec = positionRampDefaultDegPerSec, tiltPositionRampD
 bool panPositionRampEnabled = positionRampDefaultEnabled, tiltPositionRampEnabled = positionRampDefaultEnabled;
 PositionPidConfig panPositionPidConfig = panPositionPidDefaults;
 PositionPidConfig tiltPositionPidConfig = tiltPositionPidDefaults;
+float panPositionBreakawayOffsetUs = panPositionBreakawayOffsetDefaultUs;
+float panPositionBreakawayDurationMs = panPositionBreakawayDurationDefaultMs;
+float panPositionKpNear = panPositionKpNearDefault;
+float panPositionCapNearUs = panPositionCapNearDefaultUs;
+float panPositionScheduleDeg = panPositionScheduleDefaultDeg;
+float panPositionBreakawayMinScale = panPositionBreakawayMinScaleDefault;
+float panPositionSettleDeg = panPositionSettleDefaultDeg;
+PanPositionFeedback panPositionFeedback = panPositionFeedbackDefault;
+PanMagSoftIron panMagSoftIron;
+PanMagHeadingFilter panMagHeadingFilter;
 
 namespace servo_internal {
+TrackHome trackHome;
 PanCalibration panCalibration;
 QueueHandle_t messages = nullptr;
 portMUX_TYPE servoMux = portMUX_INITIALIZER_UNLOCKED;
@@ -67,6 +79,7 @@ ContinuousSpeedControl speedControl[2];
 PositionPid positionPid[2];
 bool positionActive[2] = {};
 float positionTarget[2] = {}, positionSetpoint[2] = {};
+PositionBreakaway positionBreakaway[2] = {};
 int tiltImuAxis = tiltImuAxisDefault;
 bool tiltImuMappingReady = tiltImuMappingDefaultReady;
 float tiltImuZero = tiltImuZeroDefaultDeg;
@@ -137,7 +150,10 @@ void stopOutput(int i) {
   manualDirect[i] = false;
   pwmSweep[i].active = false;
   pwmSlewVelocityUsPerSec[i] = 0;
-  if (i < 2) { positionActive[i] = false; positionPid[i].reset(); }
+  if (i < 2) {
+    positionActive[i] = false; positionPid[i].reset();
+    positionBreakaway[i] = {};
+  }
   if (i == 1 && tiltSweep.status == TiltSweepStatus::Running) {
     tiltSweep.status = TiltSweepStatus::Cancelled; tiltMaxSpeedDegPerSec = savedSweepSpeedLimit;
   }
@@ -186,6 +202,7 @@ using namespace servo_internal;
 
 void initServoOutputs() {
   loadPanSettings(); // Configuration only: never restore output/arming state.
+  loadTrackHome();
   for (int i = 0; i < 3; ++i) {
     const auto &c = SERVO_CONFIG[i];
     if (!validConfig(c)) { Serial.println("Servo error: invalid configuration"); continue; }
@@ -218,7 +235,7 @@ void initServoOutputs() {
 }
 
 void readServoCommands(bool reset) {
-  static char buffer[80]; static size_t used = 0; static bool overflow = false;
+  static char buffer[120]; static size_t used = 0; static bool overflow = false;
   if (reset) { used = 0; overflow = false; cancelServoMotion(); return; }
   for (int budget = 0; budget < 128 && telemetryStream().available(); ++budget) {
     const char ch = telemetryStream().read();

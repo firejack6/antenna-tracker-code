@@ -13,6 +13,7 @@
 #include "continuous_speed_control.h"
 #include "position_pid.h"
 #include "pan_calibration.h"
+#include "track_geo.h"
 #include <esp_timer.h>
 
 namespace servo_internal {
@@ -53,6 +54,16 @@ extern ContinuousSpeedControl speedControl[2];
 extern PositionPid positionPid[2];
 extern bool positionActive[2];
 extern float positionTarget[2], positionSetpoint[2];
+struct PositionBreakaway {
+  bool active = false;
+  int sign = 0;
+  uint64_t startedUs = 0;
+  uint64_t endedUs = 0;
+  uint64_t maxUs = 0;
+  float offsetUs = 0;
+  float startAngle = NAN;
+};
+extern PositionBreakaway positionBreakaway[2];
 extern int tiltImuAxis;
 extern bool tiltImuMappingReady;
 extern float tiltImuZero;
@@ -83,5 +94,11 @@ bool safetyCommand(const char *line);
 void command(const char *line);
 bool savePanSettings();
 void loadPanSettings();
+bool saveTrackHome();
+void loadTrackHome();
+// Arm continuous/limited position loop for one axis (Tune SERVO POSITION + TRACK TARGET).
+bool applyPositionTarget(int i, float target, const char **error);
+
+extern TrackHome trackHome;
 
 }  // namespace servo_internal

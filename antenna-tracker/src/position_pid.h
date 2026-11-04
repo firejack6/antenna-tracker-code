@@ -19,9 +19,14 @@ struct PositionPid {
   void reset() { integral = error = p = d = deadband = request = 0; }
   float update(float target, float angle, float velocity, float dt,
                const PositionPidConfig &c, float positiveDeadband, float negativeDeadband,
-               bool retainIntegralAtTarget = false) {
+               bool retainIntegralAtTarget = false, bool wrap180 = false) {
     if (!isfinite(target) || !isfinite(angle) || !isfinite(velocity) || dt <= 0) return NAN;
-    error = target-angle;
+    error = target - angle;
+    // Continuous PAN is 0–360°; without shortest-path error the long way fights the seam.
+    if (wrap180) {
+      if (error > 180) error -= 360;
+      else if (error < -180) error += 360;
+    }
     if (fabsf(error) <= c.tolerance) {
       if (retainIntegralAtTarget) {
         p = 0; d = -c.kd*velocity; deadband = 0;

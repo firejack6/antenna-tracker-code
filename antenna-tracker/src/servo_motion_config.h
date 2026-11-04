@@ -1,10 +1,55 @@
 #pragma once
 #include "position_pid.h"
+#include "pan_mag_heading.h"
 
 // Pot-feedback position loop. Gains output PWM us from angle error in degrees.
 // TILT UI changes are runtime-only. PAN's Save settings stores its current
 // tuning in NVS. PAN neutral/polarity/pot mapping defaults: pan_calibration.h.
-constexpr PositionPidConfig panPositionPidDefaults = {.2f, 0, .02f, 20, 100, 1};
+// Continuous PAN position (map go-to / track). Output is PWM µs from neutral;
+// P must clear the ~60/80 µs breakaway deadband near the target. No D — pot
+// velocity is noisy, especially across the 0°/360° seam. Live Oct 25 retune:
+// 90° wrap settle ~2 s with ramp off + 120 °/s limit.
+// SERVO PID kp/cap are the large-error (≈180°) gains. Near gains + schedule
+// are runtime (SERVO SCHEDULE PAN / Save PAN settings).
+//
+// Programmable position feedback source (SERVO FEEDBACK PAN / Save PAN).
+// FUSION is reserved — do not implement until pot min/max/flat scale works.
+enum class PanPositionFeedback : int32_t { Pot = 0, Mag = 1, Fusion = 2 };
+constexpr PanPositionFeedback panPositionFeedbackDefault = PanPositionFeedback::Pot;
+inline bool validPanPositionFeedback(int value) {
+  return value == int(PanPositionFeedback::Pot) || value == int(PanPositionFeedback::Mag);
+}
+extern PanPositionFeedback panPositionFeedback;
+extern PanMagSoftIron panMagSoftIron;
+extern PanMagHeadingFilter panMagHeadingFilter;
+constexpr PositionPidConfig panPositionPidDefaults = {3.f, .02f, 0, 40, 200, 1.5f};
+constexpr float panPositionKpNearDefault = .9f;
+constexpr float panPositionCapNearDefaultUs = 100;
+constexpr float panPositionScheduleDefaultDeg = 60; // |error| at which far gains are fully on
+constexpr float panPositionBreakawayMinScaleDefault = .45f;
+constexpr float panPositionSettleDefaultDeg = 12; // deadband ease-out band
+extern float panPositionKpNear, panPositionCapNearUs, panPositionScheduleDeg;
+extern float panPositionBreakawayMinScale, panPositionSettleDeg;
+// Kick the CR servo past static friction before handing to position PID.
+// Offset/duration are runtime (SERVO BREAKAWAY PAN / Save PAN settings).
+// Applied spike scales with command |error| (floor at minScale).
+constexpr float panPositionBreakawayOffsetDefaultUs = 200;
+constexpr float panPositionBreakawayDurationDefaultMs = 40;
+extern float panPositionBreakawayOffsetUs, panPositionBreakawayDurationMs;
+constexpr float panPositionBreakawayMinErrorDeg = 4;
+constexpr float panPositionBreakawayMoveDeg = .75f;
+constexpr float panPositionBreakawaySpeedDegPerSec = 6;
+inline bool validPanSchedule(float kpNear, float capNear, float scheduleDeg, float brkMinScale, float settleDeg) {
+  return isfinite(kpNear) && kpNear >= 0 && kpNear <= 100 &&
+    isfinite(capNear) && capNear >= 1 && capNear <= 1000 &&
+    isfinite(scheduleDeg) && scheduleDeg >= 1 && scheduleDeg <= 180 &&
+    isfinite(brkMinScale) && brkMinScale >= 0 && brkMinScale <= 1 &&
+    isfinite(settleDeg) && settleDeg >= 1 && settleDeg <= 90;
+}
+inline float panPositionErrorBlend(float absErrorDeg) {
+  if (!(absErrorDeg > 0) || !(panPositionScheduleDeg > 0)) return 0;
+  return fminf(1.f, absErrorDeg / panPositionScheduleDeg);
+}
 // Angular servo: these are PWM correction gains around the IMU angle mapping.
 // Conservative IMU position baseline from live bidirectional trials. A larger
 // derivative gain excited the servo's internal position loop; keep I/D off.
@@ -21,13 +66,14 @@ constexpr float tiltImuZeroDefaultDeg = 0;
 constexpr float tiltImuAngleAtMinPulseDefault = 28.6f, tiltImuAngleAtMaxPulseDefault = -106.2f;
 constexpr unsigned tiltImuMappedMinPulseDefault = 980, tiltImuMappedMaxPulseDefault = 1920;
 extern PositionPidConfig panPositionPidConfig, tiltPositionPidConfig;
-constexpr bool positionRampDefaultEnabled = true;
+// Map go-to wants the setpoint immediately; TILT can keep a soft ramp if re-enabled.
+constexpr bool positionRampDefaultEnabled = false;
 extern bool panPositionRampEnabled, tiltPositionRampEnabled;
-constexpr float positionRampDefaultDegPerSec = 30;
+constexpr float positionRampDefaultDegPerSec = 180;
 extern float panPositionRampDegPerSec, tiltPositionRampDegPerSec;
 
 // Device/output degrees per second, after gearing. 0 disables the limiter.
-constexpr float panDefaultMaxSpeedDegPerSec = 30.0f;
+constexpr float panDefaultMaxSpeedDegPerSec = 120.0f;
 constexpr float tiltDefaultMaxSpeedDegPerSec = 30.0f;
 
 // ANGULAR MODE ONLY (unused while continuousRotation is true): device angle
@@ -129,5 +175,9 @@ constexpr float tiltStartupSearchUsPerSec = .5f;
 constexpr float tiltStartupSearchMaxUs = 8;
 constexpr float continuousMaxPulseOffsetUs = 250.0f;
 constexpr float tiltContinuousMaxPulseOffsetUs = 500.0f;
+inline bool validPanBreakaway(float offsetUs, float durationMs) {
+  return isfinite(offsetUs) && offsetUs >= 0 && offsetUs <= continuousMaxPulseOffsetUs &&
+    isfinite(durationMs) && durationMs >= 0 && durationMs <= 2000;
+}
 constexpr unsigned continuousFaultDelayUs = 500000;
 constexpr unsigned continuousFaultMinimumReadings = 6; // Consecutive fresh feedback readings, plus delay above.

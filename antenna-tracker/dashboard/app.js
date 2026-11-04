@@ -140,7 +140,7 @@ for (const [axis, pin] of [['PAN', 1], ['TILT', 2], ['S3', 3]]) {
   $('servo-controls').append(form);
   if (axis === 'PAN') {
     const calibration = document.createElement('details'); calibration.dataset.panControls = '';
-    calibration.innerHTML = `<summary>PAN calibration and saved settings</summary><p>Changing calibration or CR tune stops PAN. Signed angle span sets pot direction; PWM polarity sets which pulse direction increases the calibrated angle. A five-turn pot with 5:1 gearing spans 360 device degrees. Save stores calibration, CR tune, PID, deadband, ramp, speed and overspeed on the ESP (no DFU needed while iterating).</p><div class="servo-fields">${[['neutral','Neutral pulse (us)',500,2500,1],['polarity','PWM polarity (+1 or -1)',-1,1,1],['vmin','Pot minimum voltage',0,3.5,'any'],['vmax','Pot maximum voltage',0,3.5,'any'],['span','Signed device angle span (degrees)',-360,360,0.01],['zero','Zero offset (degrees)',-360,360,0.01],['amin','Minimum device angle',-360,360,0.01],['amax','Maximum device angle',-360,360,0.01]].map(([key,label,min,max,step])=>`<label>${label}<input data-pan-field="${key}" type="number" min="${min}" max="${max}" step="${step}"></label>`).join('')}</div><div class="buttons"><button type="button" data-pan-action="configure">Apply calibration</button><button type="button" data-pan-action="zero">Set current position as zero</button></div><p><strong>Continuous speed tune</strong> (Wi‑Fi / NVS)</p><div class="servo-fields">${[['ff','Feedforward (µs per °/s)',0,50,'any'],['rise','PWM rise (µs/s)',1,500,1],['fall','PWM fall (µs/s)',1,1000,1],['search','Startup search (µs/s)',0,100,'any'],['search_max','Startup search max (µs)',0,200,'any'],['brake','Overspeed brake confirm (s)',0,2,'any']].map(([key,label,min,max,step])=>`<label>${label}<input data-pan-cr="${key}" type="number" min="${min}" max="${max}" step="${step}"></label>`).join('')}</div><div class="buttons"><button type="button" data-pan-action="cr_configure">Apply CR tune</button><button type="button" data-pan-action="save">Save PAN settings</button></div><p data-pan-status role="status"></p>`;
+    calibration.innerHTML = `<summary>PAN calibration and saved settings</summary><p>Changing calibration or CR tune stops PAN. Signed angle span sets pot direction; PWM polarity sets which pulse direction increases the calibrated angle. A five-turn pot with 5:1 gearing spans 360 device degrees. Save stores calibration, CR tune, PID, deadband, breakaway/schedule, ramp, speed and overspeed on the ESP (no DFU needed while iterating).</p><div class="servo-fields">${[['neutral','Neutral pulse (us)',500,2500,1],['polarity','PWM polarity (+1 or -1)',-1,1,1],['vmin','Pot minimum voltage',0,3.5,'any'],['vmax','Pot maximum voltage',0,3.5,'any'],['span','Signed device angle span (degrees)',-360,360,0.01],['zero','Zero offset (degrees)',-360,360,0.01],['amin','Minimum device angle',-360,360,0.01],['amax','Maximum device angle',-360,360,0.01]].map(([key,label,min,max,step])=>`<label>${label}<input data-pan-field="${key}" type="number" min="${min}" max="${max}" step="${step}"></label>`).join('')}</div><div class="buttons"><button type="button" data-pan-action="configure">Apply calibration</button><button type="button" data-pan-action="zero">Set current position as zero</button></div><p><strong>Continuous speed tune</strong> (Wi‑Fi / NVS)</p><div class="servo-fields">${[['ff','Feedforward (µs per °/s)',0,50,'any'],['rise','PWM rise (µs/s)',1,500,1],['fall','PWM fall (µs/s)',1,1000,1],['search','Startup search (µs/s)',0,100,'any'],['search_max','Startup search max (µs)',0,200,'any'],['brake','Overspeed brake confirm (s)',0,2,'any']].map(([key,label,min,max,step])=>`<label>${label}<input data-pan-cr="${key}" type="number" min="${min}" max="${max}" step="${step}"></label>`).join('')}</div><div class="buttons"><button type="button" data-pan-action="cr_configure">Apply CR tune</button><button type="button" data-pan-action="save">Save PAN settings</button></div><p data-pan-status role="status"></p>`;
     form.append(calibration);
     for (const button of calibration.querySelectorAll('[data-pan-action]')) button.addEventListener('click', async () => {
       const action = button.dataset.panAction, data = {action};
@@ -336,7 +336,7 @@ for (const [axis, pin] of [['PAN', 1], ['TILT', 2], ['S3', 3]]) {
       } catch (error) { pwmSweep.querySelector('[data-pwm-sweep-status]').textContent = error.message; }
     });
     const position = document.createElement('div'); position.dataset.positionControls = '';
-    position.innerHTML = `<div class="servo-fields"><label>Target angle (degrees)<input data-position-angle type="number" min="-360" max="360" step="0.01" value="0.00"></label></div><div class="buttons"><button type="button" data-position-go>Go to position</button><button type="button" data-position-stop class="secondary">Stop</button></div><p data-position-reported></p><label><input data-position-no-ramp type="checkbox"> Disable position target interpolation / ramps</label><p>Checked: the target is applied immediately. Changing this stops the axis. Feedback filtering and safety limits remain active.</p><label>Position target ramp rate (deg/s)<input data-position-ramp-rate type="number" min="0.1" max="360" step="any"></label><button type="button" data-position-ramp-save>Apply ramp rate</button><details><summary>Position PID gains</summary><p>Changing gains stops this servo. Values apply until the ESP restarts; source defaults are in servo_motion_config.h.</p><div class="servo-fields">${[['kp','P (us/degree)',0,100],['ki','I (us/(degree s))',0,100],['kd','D (us/(degree/s))',0,100],['ilimit','Integral limit (us)',0,1000],['cap','PWM correction/output limit (us)',1,1000],['tolerance','Position tolerance (degrees)',.1,30]].map(([key,label,min,max])=>`<label>${label}<input data-position-gain="${key}" type="number" min="${min}" max="${max}" step="any"></label>`).join('')}</div><button type="button" data-position-save>Apply PID gains</button><p data-position-gains></p><div data-deadband-controls><p>Deadband compensation: minimum drive offset for each physical PWM direction. Zero disables compensation. The PID output limit still caps the total offset.</p><div class="servo-fields"><label>Above-neutral deadband (us)<input data-position-db="dbplus" type="number" min="0" max="1000" step="any"></label><label>Below-neutral deadband (us)<input data-position-db="dbminus" type="number" min="0" max="1000" step="any"></label></div><button type="button" data-position-db-save>Apply deadband</button><p data-position-db-reported></p></div></details><p data-position-status role="status"></p>`;
+    position.innerHTML = `<div class="servo-fields"><label>Target angle (degrees)<input data-position-angle type="number" min="-360" max="360" step="0.01" value="0.00"></label></div><div class="buttons"><button type="button" data-position-go>Go to position</button><button type="button" data-position-stop class="secondary">Stop</button></div><p data-position-reported></p><label><input data-position-no-ramp type="checkbox"> Disable position target interpolation / ramps</label><p>Checked: the target is applied immediately. Changing this stops the axis. Feedback filtering and safety limits remain active.</p><label>Position target ramp rate (deg/s)<input data-position-ramp-rate type="number" min="0.1" max="360" step="any"></label><button type="button" data-position-ramp-save>Apply ramp rate</button><details><summary>Position PID gains</summary><p>Changing gains stops this servo. Values apply until the ESP restarts; source defaults are in servo_motion_config.h.</p><div class="servo-fields">${[['kp','P (us/degree)',0,100],['ki','I (us/(degree s))',0,100],['kd','D (us/(degree/s))',0,100],['ilimit','Integral limit (us)',0,1000],['cap','PWM correction/output limit (us)',1,1000],['tolerance','Position tolerance (degrees)',.1,30]].map(([key,label,min,max])=>`<label>${label}<input data-position-gain="${key}" type="number" min="${min}" max="${max}" step="any"></label>`).join('')}</div><button type="button" data-position-save>Apply PID gains</button><p data-position-gains></p><div data-deadband-controls><p>Deadband compensation: minimum drive offset for each physical PWM direction. Zero disables compensation. The PID output limit still caps the total offset.</p><div class="servo-fields"><label>Above-neutral deadband (us)<input data-position-db="dbplus" type="number" min="0" max="1000" step="any"></label><label>Below-neutral deadband (us)<input data-position-db="dbminus" type="number" min="0" max="1000" step="any"></label></div><button type="button" data-position-db-save>Apply deadband</button><p data-position-db-reported></p></div><div data-breakaway-controls hidden><p>Breakaway spike + error schedule. SERVO PID kp/cap are the large-error gains; near gains blend in below schedule_deg. Save PAN settings to keep across reboot.</p><div class="servo-fields"><label>Spike offset (us)<input data-breakaway-field="offset_us" type="number" min="0" max="250" step="1"></label><label>Spike duration (ms)<input data-breakaway-field="duration_ms" type="number" min="0" max="2000" step="1"></label><label>Near Kp<input data-schedule-field="kp_near" type="number" min="0" max="100" step="any"></label><label>Near cap (us)<input data-schedule-field="cap_near" type="number" min="1" max="1000" step="any"></label><label>Schedule span (°)<input data-schedule-field="schedule_deg" type="number" min="1" max="180" step="any"></label><label>Breakaway min scale<input data-schedule-field="brk_min_scale" type="number" min="0" max="1" step="any"></label><label>Settle deadband band (°)<input data-schedule-field="settle_deg" type="number" min="1" max="90" step="any"></label></div><div class="buttons"><button type="button" data-breakaway-save>Apply breakaway</button><button type="button" data-schedule-save>Apply schedule</button></div><p data-breakaway-reported></p></div></details><p data-position-status role="status"></p>`;
     if (axis === 'TILT') {
       const imuPanel = document.createElement('details'); imuPanel.dataset.imuControls = '';
       imuPanel.innerHTML = '<summary>IMU tilt feedback and PWM mapping</summary><p data-imu-reported></p><p>Map IMU angles at two PWM endpoints before angle control. Changing mapping/zero stops TILT until reboot.</p><label>Axis<select data-imu-field="axis"><option value="0">X roll</option><option value="1">Y tilt</option></select></label><div class="servo-fields"><label>Mounting zero (°)<input data-imu-field="zero" type="number" min="-720" max="720" step="0.01"></label><label>PWM at min angle (µs)<input data-imu-field="pmin" type="number" min="500" max="2500" step="1"></label><label>PWM at max angle (µs)<input data-imu-field="pmax" type="number" min="500" max="2500" step="1"></label><label>IMU at min PWM (°)<input data-imu-field="amin" type="number" min="-720" max="720" step="0.01"></label><label>IMU at max PWM (°)<input data-imu-field="amax" type="number" min="-720" max="720" step="0.01"></label></div><div class="buttons"><button type="button" data-imu-save>Apply IMU mapping</button><button type="button" data-imu-zero>Set zero here</button></div>';
@@ -357,7 +357,26 @@ for (const [axis, pin] of [['PAN', 1], ['TILT', 2], ['S3', 3]]) {
         catch(error) { position.querySelector('[data-position-status]').textContent = error.message; }
       });
     }
-    if (axis === 'PAN') position.querySelector('details p').textContent = 'Changing gains stops PAN. Apply changes here, then use Save PAN settings in the calibration section to retain them across reboot.';
+    if (axis === 'PAN') {
+      position.querySelector('details p').textContent = 'Changing gains stops PAN. Apply changes here, then use Save PAN settings in the calibration section to retain them across reboot.';
+      position.querySelector('[data-breakaway-controls]').hidden = false;
+      position.querySelector('[data-breakaway-save]').addEventListener('click', async () => {
+        const fields = [...position.querySelectorAll('[data-breakaway-field]')];
+        if (!fields.every(input => input.reportValidity())) return;
+        try {
+          await api('/api/servo-breakaway', {axis, ...Object.fromEntries(fields.map(input => [input.dataset.breakawayField, input.valueAsNumber]))});
+          position.querySelector('[data-position-status]').textContent = 'Breakaway queued; output will stop. Watch reported values, then Save PAN settings to persist.';
+        } catch (error) { position.querySelector('[data-position-status]').textContent = error.message; }
+      });
+      position.querySelector('[data-schedule-save]').addEventListener('click', async () => {
+        const fields = [...position.querySelectorAll('[data-schedule-field]')];
+        if (!fields.every(input => input.reportValidity())) return;
+        try {
+          await api('/api/servo-schedule', {axis, ...Object.fromEntries(fields.map(input => [input.dataset.scheduleField, input.valueAsNumber]))});
+          position.querySelector('[data-position-status]').textContent = 'Schedule queued; output will stop. Watch reported values, then Save PAN settings to persist.';
+        } catch (error) { position.querySelector('[data-position-status]').textContent = error.message; }
+      });
+    }
     position.querySelector('[data-position-no-ramp]').addEventListener('change', async event => {
       try {
         await api('/api/servo-ramp', {axis, enabled:!event.target.checked, rate:position.querySelector('[data-position-ramp-rate]').valueAsNumber});
@@ -413,11 +432,11 @@ for (const axis of ['PAN','TILT','S3']) {
   const layout = document.createElement('div'); layout.className = 'servo-axis-layout';
   form.before(card); card.append(heading,layout); layout.append(form);
   const plots = document.createElement('div'); plots.className = 'servo-axis-plots';
-  plots.innerHTML = `${axis !== 'S3' ? `<div><h4>Position <small>degrees</small></h4><div class="mini-legend"><span style="color:#4bd3b5">Actual</span><span style="color:#a88bfa">Target</span><span style="color:#65b5ff">Ramped target</span></div><canvas id="servo-${axis}-position-chart" aria-label="${axis} actual and target position" role="img"></canvas></div>` : ''}<div><h4>PWM output <small>µs</small></h4><canvas id="servo-${axis}-pwm-chart" aria-label="${axis} PWM pulse width" role="img"></canvas></div>`;
+  plots.innerHTML = `${axis !== 'S3' ? `<div><h4>Position <small>degrees</small></h4><div class="mini-legend"><span class="legend-actual">Actual</span><span class="legend-target">Target</span><span class="legend-ramped">Ramped target</span></div><canvas id="servo-${axis}-position-chart" aria-label="${axis} actual and target position" role="img"></canvas></div>` : ''}<div><h4>PWM output <small>µs</small></h4><canvas id="servo-${axis}-pwm-chart" aria-label="${axis} PWM pulse width" role="img"></canvas></div>`;
   layout.append(plots);
 }
 // Secondary telemetry remains available without crowding the control view.
-for (const panel of document.querySelectorAll('main section.panel:not(.connection):not(.servo-panel):not(.recording-panel):not(.map-panel)')) {
+for (const panel of document.querySelectorAll('main section.panel:not(.connection):not(.servo-panel):not(.recording-panel):not(.map-panel):not(.tune-panel)')) {
   const title = panel.querySelector('h2')?.textContent;
   if (!title) continue;
   const disclosure = document.createElement('details'); disclosure.className = 'telemetry-disclosure';
@@ -627,17 +646,24 @@ $('find').addEventListener('click', () => action(async () => {
 
 async function poll() {
   try {
-    const response = await fetch(`/api/state?since=${cursor}`, {cache: 'no-store'});
+    // Cold start: skip historical backlog so Firefox never parses megabytes of buffered samples.
+    const cold = cursor === 0 && session < 0;
+    const response = await fetch(`/api/state?since=${cold ? 2147483647 : cursor}`, {cache: 'no-store'});
     if (!response.ok) throw new Error('Relay unavailable');
     const next = await response.json();
-    if (next.cursor < cursor) {
+    if (!cold && next.cursor < cursor) {
       samples = []; logs = []; rawDirty = true; cursor = 0; session = -1;
-      // Fetch the restarted server's complete buffer on the next poll.
-      state = next; relayUp = true; render();
+      state = next; relayUp = true;
+      if (next.latest) samples = [next.latest];
+      cursor = next.cursor;
+      render();
       return;
     }
-    if (next.session !== session) {
-      samples = []; logs = []; rawDirty = true; session = next.session;
+    if (cold || next.session !== session) {
+      samples = next.latest ? [next.latest] : [];
+      logs = [];
+      rawDirty = true;
+      session = next.session;
     }
     state = next; relayUp = true;
     if (pendingConnection && next.status === 'connected' && next.mode === pendingConnection.mode) {
@@ -648,9 +674,15 @@ async function poll() {
     } else if (['error', 'disconnected'].includes(next.status)) {
       pendingConnection = null;
     }
-    samples.push(...next.samples); samples = samples.slice(-10000);
-    logs.push(...next.logs.map(line => line.text)); logs = logs.slice(-400);
-    if (next.logs.length) rawDirty = true;
+    if (!cold) {
+      if (next.samples?.length) {
+        samples.push(...next.samples); samples = samples.slice(-10000);
+      }
+      if (next.logs?.length) {
+        logs.push(...next.logs.map(line => line.text)); logs = logs.slice(-400);
+        rawDirty = true;
+      }
+    }
     cursor = next.cursor;
     updateRawMonitor();
     render();
@@ -660,11 +692,44 @@ async function poll() {
     document.body.classList.add('stale');
   } finally {
     updateButtons();
-    setTimeout(poll, 40);
+    setTimeout(poll, document.body.classList.contains('map-view') ? 150 : 40);
   }
 }
 
+function renderMapOnly() {
+  const latest = samples.at(-1) || state?.latest;
+  const age = latest ? Math.max(0, Date.now() / 1000 - latest.received_at) : Infinity;
+  const stale = !relayUp || state?.status !== 'connected' || age > 3;
+  const attitude = sensorOrientation(latest?.accel, latest?.mag);
+  const sensorAge = latest ? Date.now() / 1000 - (latest.sensor_received_at ?? latest.received_at) : Infinity;
+  const orientationStale = stale || sensorAge > 3;
+  if (typeof deviceMap !== 'undefined') {
+    deviceMap.update(attitude?.heading, orientationStale,
+      Number.isFinite(latest?.tilt_imu?.angle) ? displayAngle('TILT', latest.tilt_imu.angle) : null,
+      latest?.servo_position?.TILT?.active ? displayAngle('TILT', latest.servo_position.TILT.target) : null,
+      Number.isFinite(latest?.servo_motion?.PAN?.angle) ? latest.servo_motion.PAN.angle : null,
+      latest?.servo_position?.PAN?.active ? latest.servo_position.PAN.target : null,
+      stale,
+      latest?.effective_config?.pan_fb);
+    if (state?.track_sim) deviceMap.applyRelaySim(state.track_sim);
+  }
+  if (state && relayUp) {
+    let label = state.status === 'connected' ? (age > 3 ? 'Waiting for data' : 'Live') : state.status;
+    if (state.mode === 'demo') label = `DEMO · ${label}`;
+    $('status').textContent = label.charAt(0).toUpperCase() + label.slice(1);
+    $('status').className = `badge ${state.status === 'error' || (state.status === 'connected' && age > 3) ? 'warn' : stale ? '' : 'live'}`;
+    $('connection-message').textContent = state.message;
+  }
+  $('freshness').textContent = latest ? `Last sample ${age.toFixed(1)}s ago${stale ? ' · retained value' : ''}` : 'No samples received';
+  document.body.classList.toggle('stale', stale);
+}
+
 function render() {
+  // Map tab: do not thrash the hidden Controls DOM/charts — that freezes Firefox after Leaflet opens.
+  if (document.body.classList.contains('map-view')) {
+    renderMapOnly();
+    return;
+  }
   const recording = state?.recording;
   $('record-start').disabled = !relayUp || recordingBusy || recording?.active || recording?.finishing || state?.status !== 'connected';
   $('record-stop').disabled = !relayUp || recordingBusy || !(recording?.active || recording?.finishing);
@@ -683,7 +748,12 @@ function render() {
   const orientationStale = stale || sensorAge > 3;
   if (typeof deviceMap !== 'undefined') deviceMap.update(attitude?.heading, orientationStale,
     Number.isFinite(latest?.tilt_imu?.angle) ? displayAngle('TILT',latest.tilt_imu.angle) : null,
-    latest?.servo_position?.TILT?.active ? displayAngle('TILT',latest.servo_position.TILT.target) : null);
+    latest?.servo_position?.TILT?.active ? displayAngle('TILT',latest.servo_position.TILT.target) : null,
+    Number.isFinite(latest?.servo_motion?.PAN?.angle) ? latest.servo_motion.PAN.angle : null,
+    latest?.servo_position?.PAN?.active ? latest.servo_position.PAN.target : null,
+    stale,
+    latest?.effective_config?.pan_fb);
+  if (typeof panTune !== 'undefined') panTune.update(attitude?.heading, latest);
   $('orientation-state').textContent = !attitude ? 'Waiting for acceleration' : orientationStale ? 'Stale estimate' : 'Sensor-frame estimate';
   $('orientation-state').className = `badge ${attitude && !orientationStale ? 'live' : 'warn'}`;
   $('orientation-values').textContent = attitude ? `Roll ${attitude.roll.toFixed(1)}° · Pitch ${attitude.pitch.toFixed(1)}° · Heading ${attitude.heading == null ? 'unavailable' : attitude.heading.toFixed(1) + '°'}` : 'No valid orientation estimate';
@@ -854,6 +924,38 @@ function render() {
         if (panel.dataset.deadband !== signature) { for (const input of dbInputs) input.value = position[input.dataset.positionDb]; panel.dataset.deadband = signature; }
       }
       panel.querySelector('[data-position-db-reported]').textContent = hasDeadband ? `Reported: above neutral ${position.dbplus} us; below neutral ${position.dbminus} us` : 'Waiting for deadband-capable firmware';
+      const breakawayPanel = panel.querySelector('[data-breakaway-controls]');
+      if (breakawayPanel && !breakawayPanel.hidden) {
+        const cfg = latest?.effective_config;
+        const hasBreakaway = Number.isFinite(cfg?.pan_breakaway_us) && Number.isFinite(cfg?.pan_breakaway_ms);
+        const hasSchedule = Number.isFinite(cfg?.pan_kp_near) && Number.isFinite(cfg?.pan_schedule_deg);
+        const breakawayInputs = [...breakawayPanel.querySelectorAll('[data-breakaway-field]')];
+        const scheduleInputs = [...breakawayPanel.querySelectorAll('[data-schedule-field]')];
+        for (const control of [...breakawayInputs, breakawayPanel.querySelector('[data-breakaway-save]')]) control.disabled = !connected || stale || !hasBreakaway;
+        for (const control of [...scheduleInputs, breakawayPanel.querySelector('[data-schedule-save]')]) control.disabled = !connected || stale || !hasSchedule;
+        if (hasBreakaway) {
+          const signature = JSON.stringify([session, cfg.pan_breakaway_us, cfg.pan_breakaway_ms]);
+          if (breakawayPanel.dataset.breakaway !== signature) {
+            breakawayPanel.querySelector('[data-breakaway-field="offset_us"]').value = cfg.pan_breakaway_us;
+            breakawayPanel.querySelector('[data-breakaway-field="duration_ms"]').value = cfg.pan_breakaway_ms;
+            breakawayPanel.dataset.breakaway = signature;
+          }
+        }
+        if (hasSchedule) {
+          const map = {kp_near: 'pan_kp_near', cap_near: 'pan_cap_near', schedule_deg: 'pan_schedule_deg', brk_min_scale: 'pan_brk_min_scale', settle_deg: 'pan_settle_deg'};
+          const signature = JSON.stringify([session, ...Object.values(map).map(key => cfg[key])]);
+          if (breakawayPanel.dataset.schedule !== signature) {
+            for (const input of scheduleInputs) input.value = cfg[map[input.dataset.scheduleField]];
+            breakawayPanel.dataset.schedule = signature;
+          }
+        }
+        const parts = [];
+        if (hasBreakaway) parts.push(`spike ${cfg.pan_breakaway_us} us / ${cfg.pan_breakaway_ms} ms`);
+        if (hasSchedule) parts.push(`near Kp ${cfg.pan_kp_near} cap ${cfg.pan_cap_near} · schedule ${cfg.pan_schedule_deg}° · brk≥${cfg.pan_brk_min_scale} · settle ${cfg.pan_settle_deg}°`);
+        breakawayPanel.querySelector('[data-breakaway-reported]').textContent = parts.length
+          ? `Reported: ${parts.join(' · ')}`
+          : 'Waiting for breakaway/schedule-capable firmware';
+      }
       if (position) {
         const signature = JSON.stringify([session, ...gainInputs.map(input=>position[input.dataset.positionGain])]);
         if (panel.dataset.gains !== signature) { for(const input of gainInputs) input.value = position[input.dataset.positionGain]; panel.dataset.gains = signature; }
@@ -1025,13 +1127,22 @@ function render() {
   $('feedback-units').textContent = rawMode ? 'Raw counts' : [5, 6, 7].map(channel => `CH${channel}: ${channelScaling[channel].unit || 'scaled'}`).join(' · ');
 }
 
+window.dashboard = {
+  samples: () => samples,
+  latest: () => samples.at(-1) || state?.latest || null,
+  state: () => state,
+  recentLogs: () => logs.slice(-40),
+  api,
+};
+
 function renderCharts() {
+  if (typeof panTune !== 'undefined') panTune.paint();
   for (const servoAxis of ['PAN','TILT','S3']) {
     if (servoAxis !== 'S3') chart(`servo-${servoAxis}-position-chart`, sample => {
       const s = pidPlotSample(sample,servoAxis);
       return [s.motion?.angle ?? null,s.position?.active ? s.position.target : null,s.pid?.mode === 1 ? s.pid.setpoint : null];
-    },3,undefined,2,undefined,['#4bd3b5','#a88bfa','#65b5ff'],{sensorTime:true,key:servoAxis,wrapBreak:180});
-    chart(`servo-${servoAxis}-pwm-chart`, sample => [sample.servos?.[servoAxis]?.enable ? sample.servos[servoAxis].pulse : null],1,undefined,1,undefined,['#f5bd4f'],{sensorTime:true,key:servoAxis});
+    },3,undefined,2,undefined,['#4bd3b5','#a88bfa','#65b5ff'],{sensorTime:true,key:servoAxis,wrapBreak:180,labels:['Actual','Target','Ramped target']});
+    chart(`servo-${servoAxis}-pwm-chart`, sample => [sample.servos?.[servoAxis]?.enable ? sample.servos[servoAxis].pulse : null],1,undefined,1,undefined,['#f5bd4f'],{sensorTime:true,key:servoAxis,labels:['PWM']});
   }
   const axis = $('pid-axis').value, latest = samples.at(-1) || state?.latest;
   const current = pidPlotSample(latest || {}, axis);
@@ -1041,20 +1152,29 @@ function renderCharts() {
   for (const [key, definitions] of Object.entries(pidPlotTraces)) {
     const traces = definitions.filter((trace, index) => !hiddenPidTraces[key].has(index));
     chart(`pid-${key}-chart`, sample => traces.map(([, , get]) => get(pidPlotSample(sample, axis)) ?? null),
-      traces.length, undefined, 2, undefined, traces.map(([, color]) => color), {sensorTime: true, key: axis, wrapBreak: key === 'position' ? 180 : undefined});
+      traces.length, undefined, 2, undefined, traces.map(([, color]) => color), {
+        sensorTime: true, key: axis, wrapBreak: key === 'position' ? 180 : undefined,
+        labels: traces.map(([label]) => label),
+      });
   }
   const rawMode = $('adc-units').value === 'raw';
   for (const key of ['accel', 'gyro', 'mag']) {
     const axes = [0, 1, 2].filter(axis => !hiddenAxes[key].has(axis));
-    chart(`${key}-chart`, sample => axes.map(axis => sample[key]?.[axis] ?? null), axes.length, undefined, undefined, undefined, axes.map(axis => colors[axis]));
+    chart(`${key}-chart`, sample => axes.map(axis => sample[key]?.[axis] ?? null), axes.length, undefined, undefined, undefined, axes.map(axis => colors[axis]), {
+      labels: axes.map(axis => ['X', 'Y', 'Z'][axis]),
+    });
   }
   const value = (sample, channel) => sample.adc_mean?.[channel] ?? sample.adc[channel];
   const bounds = (sample, channel) => [sample.adc_min?.[channel] ?? sample.adc[channel], sample.adc_max?.[channel] ?? sample.adc[channel]]
     .map(value => rawMode ? value : scaledAdc(value, channel));
   const channels = [...selectedTraces].sort((a, b) => a - b);
-  chart('adc-chart', sample => channels.map(channel => rawMode ? value(sample, channel) : scaledAdc(value(sample, channel), channel)), channels.length, undefined, undefined, sample => channels.map(channel => bounds(sample, channel)), channels.map(channel => channelColors[channel]));
+  chart('adc-chart', sample => channels.map(channel => rawMode ? value(sample, channel) : scaledAdc(value(sample, channel), channel)), channels.length, undefined, undefined, sample => channels.map(channel => bounds(sample, channel)), channels.map(channel => channelColors[channel]), {
+    labels: channels.map(channel => `CH${channel}`),
+  });
   const feedback = [5, 6, 7].filter((channel, axis) => !hiddenAxes.feedback.has(axis));
-  chart('feedback-chart', sample => feedback.map(channel => rawMode ? value(sample, channel) : scaledAdc(value(sample, channel), channel)), feedback.length, undefined, undefined, sample => feedback.map(channel => bounds(sample, channel)), feedback.map(channel => channelColors[channel]));
+  chart('feedback-chart', sample => feedback.map(channel => rawMode ? value(sample, channel) : scaledAdc(value(sample, channel), channel)), feedback.length, undefined, undefined, sample => feedback.map(channel => bounds(sample, channel)), feedback.map(channel => channelColors[channel]), {
+    labels: feedback.map(channel => `CH${channel}`),
+  });
 }
 
 const chartScales = new Map();
@@ -1075,6 +1195,16 @@ function chart(id, getValues, axes, fixedRange, decimals = fixedRange ? 0 : 1, g
   const end = Math.min(last, Date.now() / 1000 - .2), span = Number($('window').value);
   let visible = samples.filter(s => stamp(s) >= end - span && stamp(s) <= end);
   if (options.sensorTime) visible = [...new Map(visible.map(sample => [stamp(sample), sample])).values()];
+  const hoverSeries = Array.from({ length: axes }, (_, axis) => ({
+    label: options.labels?.[axis] ?? `Trace ${axis + 1}`,
+    color: traceColors[axis],
+    points: [],
+  }));
+  for (const sample of visible) {
+    const t = stamp(sample);
+    const vals = getValues(sample);
+    for (let axis = 0; axis < axes; axis++) hoverSeries[axis].points.push({ t, v: vals[axis] });
+  }
   const values = visible.flatMap(sample => getBounds ? getBounds(sample).flat() : getValues(sample)).filter(Number.isFinite);
   let low = fixedRange?.[0] ?? 0, high = fixedRange?.[1] ?? 0;
   if (!fixedRange) for (const value of values) { low = Math.min(low, value); high = Math.max(high, value); }
@@ -1171,6 +1301,12 @@ function chart(id, getValues, axes, fixedRange, decimals = fixedRange ? 0 : 1, g
     ctx.stroke();
   }
   if (!values.length) {ctx.fillStyle = '#91a4bb'; ctx.textAlign = 'center'; ctx.fillText(axes ? 'Waiting for sensor data' : 'Select a trace in the legend', pad.left+w/2, pad.top+h/2);}
+  if (typeof ChartHover !== 'undefined') {
+    ChartHover.finish(ctx, canvas, {
+      pad, width, height, low, high, decimals,
+      t0: end - span, t1: end, series: hoverSeries,
+    });
+  }
 }
 
 $('export').addEventListener('click', () => {
@@ -1213,7 +1349,11 @@ window.addEventListener('resize', render);
 updateButtons(); render(); poll();
 let lastPaint = 0;
 function animatePlots(now) {
-  if (now - lastPaint >= 1000 / 30 && !document.hidden) { renderCharts(); lastPaint = now; }
+  if (document.body.classList.contains('map-view') || document.hidden) {
+    requestAnimationFrame(animatePlots);
+    return;
+  }
+  if (now - lastPaint >= 1000 / 30) { renderCharts(); lastPaint = now; }
   requestAnimationFrame(animatePlots);
 }
 requestAnimationFrame(animatePlots);

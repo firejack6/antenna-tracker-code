@@ -14,13 +14,23 @@ _PAN = struct.Struct('<8f')
 _TILT = struct.Struct('<12f5i')
 _IMU = struct.Struct('<6f3iQ2I')
 _SENSORS = struct.Struct('<9f3ifQ')
-# 14 floats, 4 ints, then pan CR tune (6f) + adc_sample_hz (f) + adc_stream (i) + wifi_ap (i)
-_CFG = struct.Struct('<14f4i7fii')
+# 14f+4i + CR(6f) + breakaway(2f) + schedule(5f) + adc_hz(f) + stream(i) + wifi(i) + pan_fb(i)
+_CFG = struct.Struct('<14f4i14fiii')
+# Schedule generation without pan_fb (pre–mag-feedback firmware).
+_CFG_SCHEDULE = struct.Struct('<14f4i14fii')
+# Breakaway only (no schedule).
+_CFG_BREAKAWAY = struct.Struct('<14f4i9fii')
+# Pre-breakaway firmware.
+_CFG_LEGACY = struct.Struct('<14f4i7fii')
 
-STATUS_SIZE = (
+_PREFIX = (
     _HEADER.size + 3 * _SERVO.size + 2 * _MOTION.size + 2 * _PID.size + 2 * _POS.size
-    + _PAN.size + _TILT.size + _IMU.size + _SENSORS.size + _CFG.size
+    + _PAN.size + _TILT.size + _IMU.size + _SENSORS.size
 )
+STATUS_SIZE = _PREFIX + _CFG.size
+STATUS_SIZE_SCHEDULE = _PREFIX + _CFG_SCHEDULE.size
+STATUS_SIZE_BREAKAWAY = _PREFIX + _CFG_BREAKAWAY.size
+STATUS_SIZE_LEGACY = _PREFIX + _CFG_LEGACY.size
 
 AXES = ('PAN', 'TILT', 'S3')
 
@@ -30,8 +40,18 @@ def _finite(value):
 
 
 def decode_status(payload: bytes) -> dict:
-    if len(payload) != STATUS_SIZE:
-        raise ValueError(f'ATS1 size {len(payload)} != {STATUS_SIZE}')
+    if len(payload) == STATUS_SIZE:
+        cfg_fmt, generation = _CFG, 'feedback'
+    elif len(payload) == STATUS_SIZE_SCHEDULE:
+        cfg_fmt, generation = _CFG_SCHEDULE, 'schedule'
+    elif len(payload) == STATUS_SIZE_BREAKAWAY:
+        cfg_fmt, generation = _CFG_BREAKAWAY, 'breakaway'
+    elif len(payload) == STATUS_SIZE_LEGACY:
+        cfg_fmt, generation = _CFG_LEGACY, 'legacy'
+    else:
+        raise ValueError(
+            f'ATS1 size {len(payload)} != {STATUS_SIZE}, {STATUS_SIZE_SCHEDULE}, '
+            f'{STATUS_SIZE_BREAKAWAY}, or {STATUS_SIZE_LEGACY}')
     offset = 0
 
     def take(fmt: struct.Struct):
@@ -110,7 +130,26 @@ def decode_status(payload: bytes) -> dict:
     bmi_valid, mag_valid, range_failed = sensors[9:12]
     chip_temp_c, chip_temp_us = sensors[12], sensors[13]
 
-    cfg = take(_CFG)
+    cfg = take(cfg_fmt)
+    pan_breakaway_us = pan_breakaway_ms = None
+    pan_kp_near = pan_cap_near = pan_schedule_deg = pan_brk_min_scale = pan_settle_deg = None
+    pan_fb = None
+    if generation == 'legacy':
+        adc_sample_hz, adc_stream, wifi_ap = _finite(cfg[24]), cfg[25], cfg[26]
+    elif generation == 'breakaway':
+        pan_breakaway_us, pan_breakaway_ms = _finite(cfg[24]), _finite(cfg[25])
+        adc_sample_hz, adc_stream, wifi_ap = _finite(cfg[26]), cfg[27], cfg[28]
+    elif generation == 'schedule':
+        pan_breakaway_us, pan_breakaway_ms = _finite(cfg[24]), _finite(cfg[25])
+        pan_kp_near, pan_cap_near = _finite(cfg[26]), _finite(cfg[27])
+        pan_schedule_deg, pan_brk_min_scale, pan_settle_deg = _finite(cfg[28]), _finite(cfg[29]), _finite(cfg[30])
+        adc_sample_hz, adc_stream, wifi_ap = _finite(cfg[31]), cfg[32], cfg[33]
+    else:
+        pan_breakaway_us, pan_breakaway_ms = _finite(cfg[24]), _finite(cfg[25])
+        pan_kp_near, pan_cap_near = _finite(cfg[26]), _finite(cfg[27])
+        pan_schedule_deg, pan_brk_min_scale, pan_settle_deg = _finite(cfg[28]), _finite(cfg[29]), _finite(cfg[30])
+        adc_sample_hz, adc_stream, wifi_ap = _finite(cfg[31]), cfg[32], cfg[33]
+        pan_fb = cfg[34]
     effective_config = dict(
         pan_speed=_finite(cfg[0]), tilt_speed=_finite(cfg[1]),
         pan_ramp_rate=_finite(cfg[2]), tilt_ramp_rate=_finite(cfg[3]),
@@ -121,9 +160,13 @@ def decode_status(payload: bytes) -> dict:
         pan_ramp=cfg[14], tilt_ramp=cfg[15], pan_osfault=cfg[16], tilt_osfault=cfg[17],
         pan_ff=_finite(cfg[18]), pan_rise=_finite(cfg[19]), pan_fall=_finite(cfg[20]),
         pan_search=_finite(cfg[21]), pan_search_max=_finite(cfg[22]), pan_brake=_finite(cfg[23]),
-        adc_sample_hz=_finite(cfg[24]), adc_stream=cfg[25], wifi_ap=cfg[26])
+        pan_breakaway_us=pan_breakaway_us, pan_breakaway_ms=pan_breakaway_ms,
+        pan_kp_near=pan_kp_near, pan_cap_near=pan_cap_near, pan_schedule_deg=pan_schedule_deg,
+        pan_brk_min_scale=pan_brk_min_scale, pan_settle_deg=pan_settle_deg,
+        pan_fb=pan_fb,
+        adc_sample_hz=adc_sample_hz, adc_stream=adc_stream, wifi_ap=wifi_ap)
 
-    if offset != STATUS_SIZE:
+    if offset != len(payload):
         raise ValueError('ATS1 unpack did not consume payload')
 
     frame = dict(

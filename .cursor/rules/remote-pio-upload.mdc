@@ -1,0 +1,18 @@
+---
+description: Always flash antenna-tracker firmware via PlatformIO Remote, never local DFU.
+alwaysApply: true
+---
+
+# Firmware upload = PlatformIO Remote only
+
+The Nano ESP32 is on the **remote agent machine**, not this PC. Local USB/DFU upload will fail with "No DFU capable USB device".
+
+**Never** run `pio run -t upload` (or any local upload) for this project.
+
+**Always** use:
+
+```bash
+pio remote --agent desktop-o1gdd79 run --force-remote -e arduino_nano_esp32 -t upload
+```
+
+from `antenna-tracker/`. If agents are missing, tell the user to start `pio remote agent start` on the agent PC, then retry. Do not fall back to local DFU unless the user explicitly asks.

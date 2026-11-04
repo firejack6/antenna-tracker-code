@@ -5,8 +5,9 @@
 // dashboard calibration and Save PAN settings can override these in NVS.
 struct PanCalibration {
   float neutral = 1500, polarity = 1;
-  // vmax inset from ~3.54 V rail seen in PAN sweeps (ADC top is soft).
-  float vmin = .004f, vmax = 3.45f, span = 360, zero = 0;
+  // vmax at the allowed ceiling so the 0°/360° pot seam (~3.54 V rail) still
+  // maps; panAngleFromVolts clamps in-band rather than returning NAN at the lip.
+  float vmin = .004f, vmax = 3.5f, span = 360, zero = 0;
   float amin = 0, amax = 360;
 };
 inline bool validPanCalibration(const PanCalibration &c) {
@@ -18,6 +19,10 @@ inline bool validPanCalibration(const PanCalibration &c) {
     isfinite(c.amin) && isfinite(c.amax) && c.amin >= -360 && c.amax <= 360 && c.amin < c.amax;
 }
 inline float panAngleFromVolts(float volts, const PanCalibration &c) {
-  if (!validPanCalibration(c) || !isfinite(volts) || volts < c.vmin-.05f || volts > c.vmax+.05f) return NAN;
-  return fminf(1, fmaxf(0,(volts-c.vmin)/(c.vmax-c.vmin)))*c.span-c.zero;
+  if (!validPanCalibration(c) || !isfinite(volts)) return NAN;
+  // Reject only absurd rail faults. Clamp the soft top/bottom so full-circle
+  // crossings do not NAN out and abort position/CR control.
+  if (volts < c.vmin - .25f || volts > c.vmax + .25f) return NAN;
+  const float clamped = fminf(c.vmax, fmaxf(c.vmin, volts));
+  return (clamped - c.vmin) / (c.vmax - c.vmin) * c.span - c.zero;
 }

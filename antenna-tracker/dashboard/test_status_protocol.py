@@ -4,7 +4,8 @@ import time
 import unittest
 import zlib
 from types import SimpleNamespace
-from status_protocol import MAGIC_STATUS, STATUS_SIZE, decode_status
+from status_protocol import (
+    MAGIC_STATUS, STATUS_SIZE, STATUS_SIZE_SCHEDULE, STATUS_SIZE_BREAKAWAY, STATUS_SIZE_LEGACY, decode_status)
 from relay import Relay, Handler
 from adc_stream import Stream
 
@@ -18,6 +19,29 @@ class StatusProtocolTests(unittest.TestCase):
         self.assertIn('TILT', frame['servo_motion'])
         self.assertIn('effective_config', frame)
         self.assertEqual(frame['effective_config']['wifi_ap'], 0)
+        self.assertEqual(frame['effective_config']['adc_stream'], 0)
+        self.assertEqual(frame['effective_config']['pan_breakaway_us'], 0)
+        self.assertEqual(frame['effective_config']['pan_kp_near'], 0)
+        self.assertEqual(frame['effective_config']['pan_fb'], 0)
+        self.assertEqual(STATUS_SIZE, 964)
+
+    def test_schedule_payload_decodes_without_pan_fb(self):
+        self.assertEqual(STATUS_SIZE_SCHEDULE, 960)
+        frame = decode_status(bytes(STATUS_SIZE_SCHEDULE))
+        self.assertEqual(frame['effective_config']['pan_kp_near'], 0)
+        self.assertIsNone(frame['effective_config']['pan_fb'])
+
+    def test_breakaway_payload_decodes_without_schedule(self):
+        self.assertEqual(STATUS_SIZE_BREAKAWAY, 940)
+        frame = decode_status(bytes(STATUS_SIZE_BREAKAWAY))
+        self.assertEqual(frame['effective_config']['pan_breakaway_us'], 0)
+        self.assertIsNone(frame['effective_config']['pan_kp_near'])
+
+    def test_legacy_payload_decodes_without_breakaway(self):
+        self.assertEqual(STATUS_SIZE_LEGACY, 932)
+        frame = decode_status(bytes(STATUS_SIZE_LEGACY))
+        self.assertIsNone(frame['effective_config']['pan_breakaway_us'])
+        self.assertIsNone(frame['effective_config']['pan_breakaway_ms'])
         self.assertEqual(frame['effective_config']['adc_stream'], 0)
 
     def test_stream_delivers_status_callback(self):

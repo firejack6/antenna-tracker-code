@@ -5,6 +5,7 @@
 #include "tilt_calibration.h"
 #include "servo_motion_config.h"
 #include "servo_motion_math.h"
+#include "pan_mag_heading.h"
 #include "continuous_speed_control.h"
 #include <esp_timer.h>
 #include <driver/ledc.h>
@@ -14,6 +15,23 @@
 #include <string.h>
 
 using namespace servo_internal;
+
+// Update mag heading EMA whenever MAG (or future FUSION) feedback is selected.
+// Pot path remains the default measuredDegrees source for CR / telemetry.
+static void updatePanMagFeedback(uint64_t now) {
+  if (panPositionFeedback != PanPositionFeedback::Mag) {
+    panMagHeadingFilter.reset();
+    return;
+  }
+  const MagImuSample sample = latestMagImuSample();
+  if (!sample.magValid || !sample.accelValid || !sample.deviceUs) return;
+  if (panMagHeadingFilter.deviceUs == sample.deviceUs) return;
+  const float raw = panMagHeadingDeg(
+    sample.accel[0], sample.accel[1], sample.accel[2],
+    sample.mag[0], sample.mag[1], sample.mag[2], panMagSoftIron);
+  panMagHeadingFilter.update(raw, sample.deviceUs);
+  (void)now;
+}
 
 void cancelServoMotion() {
   for (int i = 0; i < 3; ++i) {
@@ -30,6 +48,7 @@ void updateServoMotion() {
   if (lastMotionUs && now - lastMotionUs < servoMotionIntervalUs) return;
   const float dt = lastMotionUs ? fminf((now - lastMotionUs) * 1e-6f, 0.02f) : 0;
   lastMotionUs = now;
+  updatePanMagFeedback(now);
   auto fb = latestServoFeedback();
   float tiltVelocityAngle = NAN;
   // Use the same robust voltage for velocity, limits and sweep extrema/wraps.
@@ -133,9 +152,32 @@ void updateServoMotion() {
       stopOutput(i); queueControlMessage("Servo error: invalid speed limit"); continue;
     }
     if (positionActive[i]) {
-      if (!fresh || !isfinite(measuredSpeed[i])) {
-        stopOutput(i); queueControlMessage("Servo error: position feedback unavailable"); continue;
+      const bool wrapPan = continuous(i) && i == 0;
+      const bool useMagFb = wrapPan && panPositionFeedback == PanPositionFeedback::Mag;
+      // Mag mode closes position PID on filtered heading; pot CR path stays pot.
+      float fbAngle = measuredDegrees[i], fbSpeed = measuredSpeed[i];
+      bool fbOk = fresh && isfinite(fbSpeed) && isfinite(fbAngle);
+      if (useMagFb) {
+        fbOk = panMagHeadingFilter.fresh(now, servoFeedbackTimeoutUs);
+        fbAngle = panMagHeadingFilter.heading;
+        fbSpeed = panMagHeadingFilter.speed;
+        // Telemetry / reported motion angle follows the sensor the PID uses.
+        if (fbOk) { measuredDegrees[i] = fbAngle; measuredSpeed[i] = fbSpeed; }
       }
+      // Full-circle PAN pot seam briefly drops / spikes feedback; hold PWM like CR.
+      if (!fbOk) {
+        if (!wrapPan) {
+          stopOutput(i); queueControlMessage("Servo error: position feedback unavailable"); continue;
+        }
+        if (!invalidVelocityStartedUs[i]) invalidVelocityStartedUs[i] = now;
+        if (now - invalidVelocityStartedUs[i] >= servoFeedbackTimeoutUs) {
+          stopOutput(i); queueControlMessage(useMagFb
+            ? "Servo error: position mag feedback unavailable"
+            : "Servo error: position feedback unavailable");
+        }
+        continue;
+      }
+      invalidVelocityStartedUs[i] = 0;
       const auto calibration = getTiltCalibration();
       const float lower = positionLowerAngle(i);
       const float upper = positionUpperAngle(i);
@@ -143,9 +185,19 @@ void updateServoMotion() {
         stopOutput(i); queueControlMessage("Servo error: position target outside limits"); continue;
       }
       const float step = (i == 0 ? panPositionRampDegPerSec : tiltPositionRampDegPerSec)*dt;
+      float rampError = positionTarget[i] - positionSetpoint[i];
+      // Full-circle PAN: ramp the short way across 0°/360°.
+      if (wrapPan) {
+        if (rampError > 180) rampError -= 360;
+        else if (rampError < -180) rampError += 360;
+      }
       if (i == 0 ? panPositionRampEnabled : tiltPositionRampEnabled)
-        positionSetpoint[i] += fminf(step, fmaxf(-step, positionTarget[i]-positionSetpoint[i]));
+        positionSetpoint[i] += fminf(step, fmaxf(-step, rampError));
       else positionSetpoint[i] = positionTarget[i];
+      if (wrapPan) {
+        if (positionSetpoint[i] >= 360) positionSetpoint[i] -= 360;
+        else if (positionSetpoint[i] < 0) positionSetpoint[i] += 360;
+      }
       if (!continuous(i)) {
         // Angular PWM supplies feedforward; TILT adds an IMU position correction.
         if (!usesImu(i)) { positionPid[i].reset(); positionPid[i].error = positionTarget[i] - measuredDegrees[i]; }
@@ -173,17 +225,78 @@ void updateServoMotion() {
       const bool positive = continuousDirection(i) > 0;
       const float plus = i == 0 ? panPositiveDeadbandUs : tiltPositiveDeadbandUs;
       const float minus = i == 0 ? panNegativeDeadbandUs : tiltNegativeDeadbandUs;
-      float offset = positionPid[i].update(positionSetpoint[i], measuredDegrees[i], measuredSpeed[i], dt, config,
-        positive ? plus : minus, positive ? minus : plus);
+      float pidError = positionSetpoint[i] - fbAngle;
+      if (wrapPan) {
+        if (pidError > 180) pidError -= 360;
+        else if (pidError < -180) pidError += 360;
+      }
+      auto &kick = positionBreakaway[i];
+      const bool kickEnabled = panPositionBreakawayOffsetUs > 0 && panPositionBreakawayDurationMs > 0;
+      // Single-shot only (armed by SERVO POSITION). Auto re-kick hunted after overshoot.
+      float offset = NAN;
+      if (wrapPan && kick.active) {
+        if (!kickEnabled) {
+          kick.active = false;
+          kick.endedUs = now;
+        } else {
+          float moved = fbAngle - kick.startAngle;
+          if (moved > 180) moved -= 360;
+          else if (moved < -180) moved += 360;
+          const bool movedEnough = fabsf(moved) >= panPositionBreakawayMoveDeg;
+          const bool spinning = fabsf(fbSpeed) >= panPositionBreakawaySpeedDegPerSec;
+          const bool timedOut = now - kick.startedUs >= kick.maxUs;
+          const bool closeEnough = fabsf(pidError) <= config.tolerance;
+          if (movedEnough || spinning || timedOut || closeEnough) {
+            kick.active = false;
+            kick.endedUs = now;
+            positionPid[i].reset();
+          } else {
+            offset = kick.sign * kick.offsetUs;
+            positionPid[i].error = pidError;
+            positionPid[i].request = offset;
+            positionPid[i].deadband = 0;
+            positionPid[i].p = positionPid[i].d = 0;
+            positionPid[i].integral = 0;
+          }
+        }
+      }
+      if (!isfinite(offset)) {
+        PositionPidConfig scheduled = config;
+        float usePlus = plus, useMinus = minus;
+        if (wrapPan) {
+          // Kp/cap rise with |error| (10° soft, 180° firm). Deadband only eases
+          // in the last ~12° so settle does not bang; cruise keeps full breakaway DB.
+          const float absErr = fabsf(pidError);
+          const float blend = panPositionErrorBlend(absErr);
+          scheduled.kp = panPositionKpNear + (config.kp - panPositionKpNear) * blend;
+          scheduled.outputLimit = panPositionCapNearUs + (config.outputLimit - panPositionCapNearUs) * blend;
+          if (scheduled.kp < 0) scheduled.kp = 0;
+          if (scheduled.outputLimit < 1) scheduled.outputLimit = 1;
+          if (panPositionSettleDeg > 0 && absErr < panPositionSettleDeg) {
+            const float dbBlend = fmaxf(.25f, absErr / panPositionSettleDeg);
+            usePlus = plus * dbBlend;
+            useMinus = minus * dbBlend;
+          }
+        }
+        offset = positionPid[i].update(positionSetpoint[i], fbAngle, fbSpeed, dt, scheduled,
+          positive ? usePlus : useMinus, positive ? useMinus : usePlus, false, wrapPan);
+      }
       if (!isfinite(offset)) { stopOutput(i); continue; }
-      // Limits use the feedback's angle direction, before PWM polarity.
-      if ((measuredDegrees[i] <= lower && offset < 0) || (measuredDegrees[i] >= upper && offset > 0)) offset = 0;
-      const bool excessive = speedLimit(i) > 0 && (i == 0 ? panOverspeedFaultEnabled : tiltOverspeedFaultEnabled) && fabsf(measuredSpeed[i]) > speedLimit(i)*1.5f+5;
+      // Soft ends only for limited travel. Full-circle PAN must cross 0°/360°.
+      const bool fullCircle = wrapPan && (upper - lower) >= 359.f;
+      if (!fullCircle && ((fbAngle <= lower && offset < 0) || (fbAngle >= upper && offset > 0))) offset = 0;
+      // Seam crossings produce brief hundreds-of-deg/s spikes; allow more headroom.
+      // Mag feedback uses the EMA speed (already smoothed); keep the same ceil.
+      const float overspeedCeil = fullCircle ? speedLimit(i) * 2.5f + 20 : speedLimit(i) * 1.5f + 5;
+      const bool excessive = speedLimit(i) > 0 && (i == 0 ? panOverspeedFaultEnabled : tiltOverspeedFaultEnabled) &&
+        fabsf(fbSpeed) > overspeedCeil;
       if (overspeedConfirmation[i].update(excessive, fb.deviceUs, now, continuousFaultMinimumReadings, continuousFaultDelayUs)) {
         stopOutput(i); queueControlMessage("Servo error: position overspeed"); continue;
       }
       const auto &c = SERVO_CONFIG[i];
-      const float output = fminf(c.maxPulseUs, fmaxf(c.minPulseUs, neutralPulse(i)+continuousDirection(i)*offset));
+      const float spikeCap = fminf(continuousMaxPulseOffsetUs, fmaxf(config.outputLimit, kick.offsetUs > 0 ? kick.offsetUs : panPositionBreakawayOffsetUs));
+      const float limited = kick.active ? fminf(spikeCap, fmaxf(-spikeCap, offset)) : offset;
+      const float output = fminf(c.maxPulseUs, fmaxf(c.minPulseUs, neutralPulse(i)+continuousDirection(i)*limited));
       rampPulseUs[i] = output;
       if ((i == 1 ? fabsf(output-actualTiltPulseUs) >= .15625f : uint32_t(lroundf(output)) != pulseUs[i]) && !applyPulse(i, output)) {
         stopOutput(i); queueControlMessage("Servo error: position PWM update failed");

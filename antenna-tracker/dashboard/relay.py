@@ -24,8 +24,11 @@ from recording import Recorder
 from dropouts import DropoutMonitor
 from temperature_log import TemperatureLog
 from status_protocol import decode_status
+from track_sim import TrackSim, list_flights, list_sites
 
 ROOT = Path(__file__).resolve().parent
+# Cap /api/state sample backlog so a cold browser poll cannot download megabytes.
+MAX_SNAPSHOT_SAMPLES = 250
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 VECTOR = re.compile(r"^(Accel g|Gyro dps|Mag uT) \(x,y,z\):\s*(.*)$")
 REMOTE_RETRY_DELAYS = (1, 2, 4)
@@ -224,6 +227,7 @@ class Relay:
         self.dropouts = DropoutMonitor(ROOT / 'health-logs')
         self.temperature_log = TemperatureLog(ROOT / 'health-logs')
         self.temperature = None
+        self.track_sim = TrackSim(self)
 
     def corrupt_packet(self):
         with self.lock:
@@ -477,6 +481,48 @@ class Relay:
                 if not all(type(v) in (int,float) and math.isfinite(v) and 0 <= v <= 1000 for v in values):
                     raise ValueError('Deadband offsets must be between 0 and 1000 us')
                 command = f'SERVO DEADBAND {axis} ' + ' '.join(f'{v:g}' for v in values) + '\n'
+            elif gains == 'breakaway':
+                if axis != 'PAN':
+                    raise ValueError('Breakaway spike is PAN-only')
+                offset = data.get('offset_us')
+                duration = data.get('duration_ms')
+                if type(offset) not in (int, float) or not math.isfinite(offset) or not 0 <= offset <= 250:
+                    raise ValueError('Breakaway offset must be between 0 and 250 us')
+                if type(duration) not in (int, float) or not math.isfinite(duration) or not 0 <= duration <= 2000:
+                    raise ValueError('Breakaway duration must be between 0 and 2000 ms')
+                command = f'SERVO BREAKAWAY PAN {offset:g} {duration:g}\n'
+            elif gains == 'schedule':
+                if axis != 'PAN':
+                    raise ValueError('Position schedule is PAN-only')
+                limits = [('kp_near', 0, 100), ('cap_near', 1, 1000), ('schedule_deg', 1, 180),
+                          ('brk_min_scale', 0, 1), ('settle_deg', 1, 90)]
+                values = []
+                for key, lower, upper in limits:
+                    value = data.get(key)
+                    if type(value) not in (int, float) or not math.isfinite(value) or not lower <= value <= upper:
+                        raise ValueError(f'Invalid {key}: expected {lower} through {upper}')
+                    values.append(f'{value:g}')
+                command = 'SERVO SCHEDULE PAN ' + ' '.join(values) + '\n'
+            elif gains == 'feedback':
+                if axis != 'PAN':
+                    raise ValueError('Position feedback source is PAN-only')
+                mode = str(data.get('mode', '')).upper()
+                if mode not in ('POT', 'MAG'):
+                    raise ValueError('Feedback mode must be POT or MAG')
+                command = f'SERVO FEEDBACK PAN {mode}\n'
+            elif gains == 'magsoft':
+                if axis != 'PAN':
+                    raise ValueError('Mag soft-iron is PAN-only')
+                if data.get('clear') or data.get('action') == 'clear':
+                    command = 'SERVO MAGSOFT CLEAR\n'
+                else:
+                    values = [data.get(key) for key in ('cx', 'cy', 'sx', 'sy')]
+                    if not all(type(v) in (int, float) and math.isfinite(v) for v in values):
+                        raise ValueError('Mag soft-iron needs finite cx cy sx sy')
+                    cx, cy, sx, sy = values
+                    if not (sx > 1e-3 and sy > 1e-3):
+                        raise ValueError('Mag soft-iron scales must be > 0')
+                    command = f'SERVO MAGSOFT {cx:g} {cy:g} {sx:g} {sy:g}\n'
             elif gains:
                 limits = [('kp',0,100), ('ki',0,100), ('kd',0,100), ('ilimit',0,1000), ('cap',1,1000), ('tolerance',.1,30)]
                 values = []
@@ -515,6 +561,51 @@ class Relay:
                 raise ValueError('Wait for fresh motion telemetry from updated firmware')
             try: self.commands.put_nowait(f'SERVO SPEED {axis} {speed:g}\n'.encode('ascii'))
             except queue.Full: raise ValueError('Command queue is full')
+
+    def _queue_track_line(self, command, require_armed=False):
+        with self.control, self.lock:
+            if self.status != 'connected':
+                raise ValueError('Connect to the board first')
+            latest = self.telemetry if self.binary_active else (self.samples[-1] if self.samples else None)
+            if not latest or time.time() - latest['received_at'] > 3:
+                raise ValueError('Wait for fresh telemetry')
+            if require_armed:
+                if self.servo_inhibit or not self.servo_safety or not self.servo_safety.get('armed') or self.servo_safety.get('estop'):
+                    raise ValueError('Enable servos before track target')
+            try:
+                self.commands.put_nowait(command.encode('ascii'))
+            except queue.Full:
+                raise ValueError('Command queue is full')
+
+    def command_track_home(self, data):
+        lat, lon, alt = data.get('lat'), data.get('lon'), data.get('alt', 0)
+        if type(lat) not in (int, float) or type(lon) not in (int, float) or type(alt) not in (int, float):
+            raise ValueError('Track HOME needs numeric lat lon alt')
+        if not all(math.isfinite(v) for v in (lat, lon, alt)) or abs(lat) > 90 or abs(lon) > 180 or not 0 <= alt <= 10000:
+            raise ValueError('Track HOME lat/lon/alt out of range')
+        decl = float(data.get('decl', data.get('mag_declination', 0)) or 0)
+        align = float(data.get('pan_align', 0) or 0)
+        invert = 1 if data.get('pan_invert') else 0
+        if not math.isfinite(decl) or abs(decl) > 360 or not math.isfinite(align) or abs(align) > 360:
+            raise ValueError('Track DECL/ALIGN out of range')
+        self._queue_track_line(f'TRACK HOME {lat:g} {lon:g} {alt:g}\n')
+        self._queue_track_line(f'TRACK DECL {decl:g}\n')
+        self._queue_track_line(f'TRACK ALIGN {align:g}\n')
+        self._queue_track_line(f'TRACK INVERT {invert}\n')
+        return dict(ok=True, message='TRACK HOME/DECL/ALIGN queued')
+
+    def command_track_target(self, data):
+        lat, lon, alt = data.get('lat'), data.get('lon'), data.get('alt')
+        if type(lat) not in (int, float) or type(lon) not in (int, float) or type(alt) not in (int, float):
+            raise ValueError('Track TARGET needs numeric lat lon alt')
+        if not all(math.isfinite(v) for v in (lat, lon, alt)) or abs(lat) > 90 or abs(lon) > 180 or not 0 <= alt <= 100000:
+            raise ValueError('Track TARGET lat/lon/alt out of range')
+        self._queue_track_line(f'TRACK TARGET {lat:.8f} {lon:.8f} {alt:g}\n', require_armed=True)
+        return dict(ok=True, lat=lat, lon=lon, alt=alt)
+
+    def command_track_off(self):
+        self._queue_track_line('TRACK OFF\n')
+        return dict(ok=True, message='TRACK OFF queued')
 
     def command_servo_pwm_sweep(self, data):
         axis, action = data.get('axis'), data.get('action')
@@ -746,7 +837,7 @@ class Relay:
             tilt_imu=imu,
             sources=dict(
                 firmware_headers='src/servo_motion_config.h, pan_calibration.h, tilt_calibration.h, sampling_config.h, network_config.h',
-                nvs='PAN settings (pan-settings), TILT pot calibration (tilt-cal); TILT IMU/PID are RAM until reboot',
+                nvs='PAN settings (pan-settings: cal/CR/PID/schedule/feedback/magsoft), TILT pot calibration (tilt-cal); TILT IMU/PID are RAM until reboot',
                 browser='channel-scaling.js / localStorage overrides display scaling only; map location in localStorage',
             ),
         )
@@ -774,6 +865,7 @@ class Relay:
                 first, last = self.receipt_history[0], self.receipt_history[-1]
                 if last[0] > first[0] and time.monotonic() - last[0] < 1:
                     received_hz = (last[1] - first[1]) / (last[0] - first[0])
+            track_sim = self.track_sim.snapshot()
             return dict(status=self.status, message=self.message, mode=self.mode,
                         servo_safety=dict(self.servo_safety) if self.servo_safety else None,
                         safety_command=dict(self.safety_command) if self.safety_command else None,
@@ -783,6 +875,7 @@ class Relay:
                         dropouts=dropouts,
                         temperature=dict(self.temperature) if self.temperature else None,
                         temperature_log=temperature_log,
+                        track_sim=track_sim,
                         session=self.session, cursor=self.sequence,
                         acquisition=dict(raw_scans=self.raw_scans, sequence_gaps=self.sequence_gaps,
                                          clock_offset=self.adc_time_offset,
@@ -798,8 +891,9 @@ class Relay:
                                          tcp_receive_age_ms=None if self.tcp_last_received is None else round(max(0, now - self.tcp_last_received) * 1000, 1),
                                          tcp_max_receive_gap_ms=round(self.tcp_max_receive_gap_ms, 1),
                                          tcp_max_decode_ms=round(self.tcp_max_decode_ms, 1)),
-                        samples=[s for s in self.samples if s["id"] > since],
-                        logs=[s for s in self.logs if s["id"] > since],
+                        samples=(lambda new: new[-MAX_SNAPSHOT_SAMPLES:] if len(new) > MAX_SNAPSHOT_SAMPLES else new)(
+                            [s for s in self.samples if s["id"] > since]),
+                        logs=[s for s in self.logs if s["id"] > since][-80:],
                         latest=self.samples[-1] if self.samples else None)
 
     def _disconnect(self):
@@ -819,6 +913,8 @@ class Relay:
         self.set_status("disconnected", "Disconnected; captured data is retained until the next connection.")
 
     def disconnect(self):
+        # Stop sim outside the control lock — worker may need that lock to exit.
+        self.track_sim.stop_sim(send_off=False)
         with self.control:
             self._disconnect()
 
@@ -839,6 +935,7 @@ class Relay:
             host, separator, tcp_port = port.rpartition(':')
             if not separator or not host or len(host) > 200 or not tcp_port.isdigit() or not 1 <= int(tcp_port) <= 65535:
                 raise ValueError('Enter ESP address as hostname:port, for example 192.168.20.1:9000')
+        self.track_sim.stop_sim(send_off=False)
         with self.control:
             self._disconnect()
             with self.lock:
@@ -1176,7 +1273,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://tile.openstreetmap.org; connect-src 'self'; frame-ancestors 'none'")
+        # style-src needs 'unsafe-inline' for Leaflet element styles + CSS var setProperty on legends.
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://tile.openstreetmap.org; connect-src 'self'; frame-ancestors 'none'")
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -1247,12 +1345,18 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             with path.open('rb') as source: shutil.copyfileobj(source, self.wfile)
             return
+        if url.path == '/api/track-flights':
+            return self.reply({'flights': list_flights(), 'sites': list_sites()})
+        if url.path == '/api/track-sites':
+            return self.reply({'sites': list_sites()})
         files = {"/": ("index.html", "text/html; charset=utf-8"),
                  "/device-map.js": ("device-map.js", "text/javascript; charset=utf-8"),
                  "/vendor/leaflet/leaflet.js": ("vendor/leaflet/leaflet.js", "text/javascript; charset=utf-8"),
                  "/vendor/leaflet/leaflet.css": ("vendor/leaflet/leaflet.css", "text/css; charset=utf-8"),
                  "/app.js": ("app.js", "text/javascript; charset=utf-8"),
                  "/orientation.js": ("orientation.js", "text/javascript; charset=utf-8"),
+                 "/pan-tune.js": ("pan-tune.js", "text/javascript; charset=utf-8"),
+                 "/chart-hover.js": ("chart-hover.js", "text/javascript; charset=utf-8"),
                  "/channel-scaling.js": ("channel-scaling.js", "text/javascript; charset=utf-8"),
                  "/style.css": ("style.css", "text/css; charset=utf-8")}
         if url.path not in files:
@@ -1299,6 +1403,18 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == '/api/servo-deadband':
                 self.server.relay.command_servo_position(data, gains='deadband')
                 self.reply({'ok': True})
+            elif self.path == '/api/servo-breakaway':
+                self.server.relay.command_servo_position(data, gains='breakaway')
+                self.reply({'ok': True})
+            elif self.path == '/api/servo-schedule':
+                self.server.relay.command_servo_position(data, gains='schedule')
+                self.reply({'ok': True})
+            elif self.path == '/api/servo-feedback':
+                self.server.relay.command_servo_position(data, gains='feedback')
+                self.reply({'ok': True})
+            elif self.path == '/api/servo-magsoft':
+                self.server.relay.command_servo_position(data, gains='magsoft')
+                self.reply({'ok': True})
             elif self.path == '/api/servo-pid':
                 self.server.relay.command_servo_position(data, gains=True)
                 self.reply({'ok': True})
@@ -1329,6 +1445,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(self.server.relay.recorder.start(data.get('scaling')))
             elif self.path == '/api/recording/stop':
                 self.reply(self.server.relay.recorder.stop())
+            elif self.path == '/api/track-sim':
+                action = str(data.get('action', '')).lower()
+                if action == 'start':
+                    self.reply(self.server.relay.track_sim.start(data))
+                elif action == 'stop':
+                    self.reply(self.server.relay.track_sim.stop_sim(send_off=bool(data.get('off', True))))
+                else:
+                    raise ValueError("track-sim action must be start or stop")
+            elif self.path == '/api/track-home':
+                self.reply(self.server.relay.command_track_home(data))
+            elif self.path == '/api/track-target':
+                self.reply(self.server.relay.command_track_target(data))
+            elif self.path == '/api/track-off':
+                self.reply(self.server.relay.command_track_off())
             else:
                 self.reply({"error": "Not found"}, 404)
         except (ValueError, TypeError) as exc:

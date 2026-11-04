@@ -4,14 +4,162 @@
 #include "servo_feedback.h"
 #include "tilt_imu.h"
 #include "tilt_calibration.h"
+#include "pan_mag_heading.h"
+#include "track_geo.h"
 #include <esp_timer.h>
 #include <driver/ledc.h>
 #include <driver/mcpwm.h>
 #include <string.h>
+#include <math.h>
 
 namespace servo_internal {
+
+bool applyPositionTarget(int i, float target, const char **error) {
+  static const char *errArmed = "position requires enabled output, fresh feedback, valid limits";
+  static const char *errPwm = "angle outside programmed PWM mapping";
+  static const char *errApply = "position PWM unavailable";
+  if (error) *error = nullptr;
+  const auto fb = latestServoFeedback();
+  const auto calibration = getTiltCalibration();
+  const float lower = positionLowerAngle(i);
+  const float upper = positionUpperAngle(i);
+  const uint64_t nowUs = esp_timer_get_time();
+  const bool panMagMode = i == 0 && panPositionFeedback == PanPositionFeedback::Mag;
+  bool feedbackOk = false;
+  if (usesImu(i)) feedbackOk = tiltImuMappingReady && imuFresh(latestTiltImu(), nowUs);
+  else if (panMagMode) {
+    const MagImuSample sample = latestMagImuSample();
+    const float raw = (sample.magValid && sample.accelValid)
+      ? panMagHeadingDeg(sample.accel[0], sample.accel[1], sample.accel[2],
+                         sample.mag[0], sample.mag[1], sample.mag[2], panMagSoftIron)
+      : NAN;
+    if (isfinite(raw) && sample.deviceUs) panMagHeadingFilter.update(raw, sample.deviceUs);
+    feedbackOk = panMagHeadingFilter.fresh(nowUs, servoFeedbackTimeoutUs);
+  } else feedbackOk = feedbackFresh(fb, i, nowUs);
+  if (!armed || estopLatched || !ready[i] || !feedbackOk ||
+      !isfinite(target) || target < lower || target > upper ||
+      (i == 1 && tiltSweep.status == TiltSweepStatus::Running)) {
+    if (error) *error = errArmed;
+    return false;
+  }
+  const float targetPulse = continuous(i) ? float(neutralPulse(i)) : angularPositionPulse(i, target);
+  const auto &c = SERVO_CONFIG[i];
+  if (!isfinite(targetPulse) || targetPulse < c.minPulseUs || targetPulse > c.maxPulseUs) {
+    if (error) *error = errPwm;
+    return false;
+  }
+  // Already in position mode: retarget in place (no PWM stop / PID reset) so TRACK
+  // samples slew via the existing ramp instead of stair-stepping.
+  if (i < 2 && positionActive[i] && enabled[i]) {
+    positionTarget[i] = target;
+    targetPulseUs[i] = uint32_t(lroundf(targetPulse));
+    return true;
+  }
+  const bool ramp = i == 0 ? panPositionRampEnabled : tiltPositionRampEnabled;
+  const auto &servo = SERVO_CONFIG[i];
+  const float startAngle = continuous(i)
+    ? (panMagMode ? panMagHeadingFilter.heading : feedbackAngle(fb, i))
+    : pulseToDeviceAngle(pulseUs[i], servo.minPulseUs, servo.maxPulseUs, minAngle(i), maxAngle(i)) - (i == 1 ? calibration.zeroDeg : 0);
+  const float measured = usesImu(i) ? latestTiltImu().angle[tiltImuAxis]-tiltImuZero : startAngle;
+  const float initialAngle = ramp ? measured : target;
+  const float initialPulse = continuous(i) ? float(neutralPulse(i)) : angularPositionPulse(i, initialAngle);
+  if (!isfinite(initialPulse) || initialPulse < c.minPulseUs || initialPulse > c.maxPulseUs) {
+    if (error) *error = errPwm;
+    return false;
+  }
+  stopOutput(i);
+  if (!applyPulse(i, initialPulse)) {
+    stopOutput(i);
+    if (error) *error = errApply;
+    return false;
+  }
+  rampPulseUs[i] = initialPulse; targetPulseUs[i] = uint32_t(lroundf(targetPulse));
+  positionSetpoint[i] = initialAngle; positionTarget[i] = target; positionActive[i] = true;
+  positionBreakaway[i] = {};
+  if (continuous(i) && i == 0 && isfinite(measured)) {
+    float err = target - measured;
+    if (err > 180) err -= 360;
+    else if (err < -180) err += 360;
+    if (panPositionBreakawayOffsetUs > 0 && panPositionBreakawayDurationMs > 0 &&
+        fabsf(err) > panPositionBreakawayMinErrorDeg) {
+      const float blend = fmaxf(panPositionBreakawayMinScale, panPositionErrorBlend(fabsf(err)));
+      positionBreakaway[i].active = true;
+      positionBreakaway[i].sign = err > 0 ? 1 : -1;
+      positionBreakaway[i].startedUs = esp_timer_get_time();
+      positionBreakaway[i].startAngle = measured;
+      positionBreakaway[i].offsetUs = panPositionBreakawayOffsetUs * blend;
+      positionBreakaway[i].maxUs = uint64_t(panPositionBreakawayDurationMs * 1000.f * blend + .5f);
+    }
+  }
+  return true;
+}
+
 void command(const char *line) {
   if (safetyCommand(line)) return;
+  if (!strncmp(line, "TRACK ", 6)) {
+    if (!strcmp(line, "TRACK OFF")) {
+      stopOutput(0); stopOutput(1);
+      queueControlMessage("Track off"); return;
+    }
+    float lat = NAN, lon = NAN, alt = NAN, decl = NAN, align = NAN; int end = 0, invert = -1;
+    if (sscanf(line, "TRACK HOME %f %f %f %n", &lat, &lon, &alt, &end) == 3 && end && !line[end]) {
+      if (!validTrackHomeCoords(lat, lon, alt)) {
+        queueControlMessage("Track error: invalid HOME lat lon alt"); return;
+      }
+      trackHome.lat = lat; trackHome.lon = lon; trackHome.alt = alt; trackHome.valid = true;
+      queueControlMessage(saveTrackHome() ? "Track HOME saved" : "Track HOME set (NVS save failed)"); return;
+    }
+    if (sscanf(line, "TRACK DECL %f %n", &decl, &end) == 1 && end && !line[end]) {
+      if (!validTrackDecl(decl)) { queueControlMessage("Track error: invalid DECL"); return; }
+      trackHome.decl = decl;
+      queueControlMessage(trackHome.valid && saveTrackHome() ? "Track DECL saved" : "Track DECL set"); return;
+    }
+    if (sscanf(line, "TRACK ALIGN %f %n", &align, &end) == 1 && end && !line[end]) {
+      if (!validTrackAlign(align)) { queueControlMessage("Track error: invalid ALIGN"); return; }
+      trackHome.panAlign = align;
+      queueControlMessage(trackHome.valid && saveTrackHome() ? "Track ALIGN saved" : "Track ALIGN set"); return;
+    }
+    if (sscanf(line, "TRACK INVERT %d %n", &invert, &end) == 1 && end && !line[end] && (invert == 0 || invert == 1)) {
+      trackHome.panInvert = invert != 0;
+      queueControlMessage(trackHome.valid && saveTrackHome() ? "Track INVERT saved" : "Track INVERT set"); return;
+    }
+    end = 0;
+    if (sscanf(line, "TRACK TARGET %f %f %f %n", &lat, &lon, &alt, &end) == 3 && end && !line[end]) {
+      if (!trackHome.valid) { queueControlMessage("Track error: set TRACK HOME first"); return; }
+      if (!isfinite(lat) || !isfinite(lon) || !isfinite(alt) || fabsf(lat) > 90.f || fabsf(lon) > 180.f ||
+          alt < 0.f || alt > 100000.f) {
+        queueControlMessage("Track error: invalid TARGET lat lon alt"); return;
+      }
+      const float range = fmaxf(1.f, trackHaversineM(trackHome.lat, trackHome.lon, lat, lon));
+      const float azTrue = trackBearingDeg(trackHome.lat, trackHome.lon, lat, lon);
+      const float relAlt = alt - trackHome.alt;
+      float el = atanf(relAlt / range) * 57.2957795f;
+      if (el < -5.f) el = -5.f;
+      if (el > 85.f) el = 85.f;
+      float pan;
+      if (panPositionFeedback == PanPositionFeedback::Mag) {
+        pan = trackWrap360(azTrue - trackHome.decl);
+      } else if (trackHome.panInvert) {
+        pan = trackWrap360(trackHome.panAlign - azTrue);
+      } else {
+        pan = trackWrap360(azTrue - trackHome.panAlign);
+      }
+      const float tilt = -el;
+      // TRACK updates arrive at GPS cadence; ramp tilt so soft-retargets glide.
+      tiltPositionRampEnabled = true;
+      const char *err = nullptr;
+      if (!applyPositionTarget(0, pan, &err)) {
+        queueControlMessage(err ? err : "Track error: PAN position failed"); return;
+      }
+      if (!applyPositionTarget(1, tilt, &err)) {
+        queueControlMessage(err ? err : "Track error: TILT position failed"); return;
+      }
+      char msg[96];
+      snprintf(msg, sizeof(msg), "Track TARGET az=%.1f el=%.1f pan=%.1f", azTrue, el, pan);
+      queueControlMessage(msg); return;
+    }
+    queueControlMessage("Track error: expected HOME|DECL|ALIGN|INVERT|TARGET|OFF"); return;
+  }
   if (!strncmp(line, "PAN ", 4)) {
     if (!strcmp(line,"PAN SAVE")) {
       stopOutput(0);
@@ -227,6 +375,70 @@ void command(const char *line) {
     (i == 0 ? panNegativeDeadbandUs : tiltNegativeDeadbandUs) = minus;
     queueControlMessage("Servo deadband applied; output stopped"); return;
   }
+  if (!strncmp(line, "SERVO BREAKAWAY ", 16)) {
+    char axis[8] = {}; int end = 0; float offset = NAN, durationMs = NAN;
+    const int fields = sscanf(line, "SERVO BREAKAWAY %7s %f %f %n", axis, &offset, &durationMs, &end);
+    if (strcmp(axis, "PAN") || fields != 3 || !end || line[end] || !validPanBreakaway(offset, durationMs)) {
+      queueControlMessage("Servo error: expected SERVO BREAKAWAY PAN offset_us duration_ms"); return;
+    }
+    stopOutput(0);
+    panPositionBreakawayOffsetUs = offset;
+    panPositionBreakawayDurationMs = durationMs;
+    queueControlMessage("Servo breakaway applied; output stopped; save to persist"); return;
+  }
+  if (!strncmp(line, "SERVO SCHEDULE ", 15)) {
+    char axis[8] = {}; int end = 0;
+    float kpNear = NAN, capNear = NAN, scheduleDeg = NAN, brkMinScale = NAN, settleDeg = NAN;
+    const int fields = sscanf(line, "SERVO SCHEDULE %7s %f %f %f %f %f %n", axis, &kpNear, &capNear, &scheduleDeg, &brkMinScale, &settleDeg, &end);
+    if (strcmp(axis, "PAN") || fields != 6 || !end || line[end] ||
+        !validPanSchedule(kpNear, capNear, scheduleDeg, brkMinScale, settleDeg)) {
+      queueControlMessage("Servo error: expected SERVO SCHEDULE PAN kp_near cap_near schedule_deg brk_min_scale settle_deg"); return;
+    }
+    stopOutput(0);
+    panPositionKpNear = kpNear;
+    panPositionCapNearUs = capNear;
+    panPositionScheduleDeg = scheduleDeg;
+    panPositionBreakawayMinScale = brkMinScale;
+    panPositionSettleDeg = settleDeg;
+    queueControlMessage("Servo schedule applied; output stopped; save to persist"); return;
+  }
+  if (!strncmp(line, "SERVO FEEDBACK ", 15)) {
+    char axis[8] = {}, mode[12] = {}; int end = 0;
+    if (sscanf(line, "SERVO FEEDBACK %7s %11s %n", axis, mode, &end) != 2 || !end || line[end] || strcmp(axis, "PAN")) {
+      queueControlMessage("Servo error: expected SERVO FEEDBACK PAN POT|MAG"); return;
+    }
+    PanPositionFeedback next = PanPositionFeedback::Pot;
+    if (!strcmp(mode, "POT") || !strcmp(mode, "0")) next = PanPositionFeedback::Pot;
+    else if (!strcmp(mode, "MAG") || !strcmp(mode, "1")) next = PanPositionFeedback::Mag;
+    else { queueControlMessage("Servo error: feedback mode must be POT or MAG (FUSION not implemented)"); return; }
+    stopOutput(0);
+    panPositionFeedback = next;
+    panMagHeadingFilter.reset();
+    queueControlMessage(next == PanPositionFeedback::Mag
+      ? "Servo PAN feedback MAG; output stopped; save to persist"
+      : "Servo PAN feedback POT; output stopped; save to persist");
+    return;
+  }
+  if (!strncmp(line, "SERVO MAGSOFT ", 14)) {
+    int end = 0;
+    if (!strcmp(line, "SERVO MAGSOFT CLEAR") || !strcmp(line, "SERVO MAGSOFT OFF")) {
+      panMagSoftIron.enabled = false;
+      panMagSoftIron.cx = panMagSoftIron.cy = 0;
+      panMagSoftIron.sx = panMagSoftIron.sy = 1;
+      panMagHeadingFilter.reset();
+      queueControlMessage("Servo mag soft-iron cleared; save PAN to persist"); return;
+    }
+    float cx = NAN, cy = NAN, sx = NAN, sy = NAN;
+    if (sscanf(line, "SERVO MAGSOFT %f %f %f %f %n", &cx, &cy, &sx, &sy, &end) != 4 || !end || line[end] ||
+        !validPanMagSoftIron(cx, cy, sx, sy)) {
+      queueControlMessage("Servo error: expected SERVO MAGSOFT cx cy sx sy | CLEAR"); return;
+    }
+    panMagSoftIron.enabled = true;
+    panMagSoftIron.cx = cx; panMagSoftIron.cy = cy;
+    panMagSoftIron.sx = sx; panMagSoftIron.sy = sy;
+    panMagHeadingFilter.reset();
+    queueControlMessage("Servo mag soft-iron applied; save PAN to persist"); return;
+  }
   if (!strncmp(line, "SERVO PID ", 10) || !strncmp(line, "SERVO POSITION ", 15)) {
     char axis[8] = {}; int end = 0;
     const bool gains = !strncmp(line, "SERVO PID ", 10);
@@ -242,34 +454,13 @@ void command(const char *line) {
       (i == 0 ? panPositionPidConfig : tiltPositionPidConfig) = config;
       queueControlMessage("Servo position PID applied; output stopped"); return;
     }
-    const auto fb = latestServoFeedback();
-    const auto calibration = getTiltCalibration();
-    const float lower = positionLowerAngle(i);
-    const float upper = positionUpperAngle(i);
-    if (!armed || estopLatched || !ready[i] || (usesImu(i) ? (!tiltImuMappingReady || !imuFresh(latestTiltImu(),esp_timer_get_time())) : !feedbackFresh(fb, i, esp_timer_get_time())) ||
-        !isfinite(target) || target < lower || target > upper ||
-        (i == 1 && tiltSweep.status == TiltSweepStatus::Running)) {
-      queueControlMessage("Servo error: position requires enabled output, fresh feedback, valid limits"); return;
+    const char *err = nullptr;
+    if (!applyPositionTarget(i, target, &err)) {
+      queueControlMessage(err ? err : "Servo error: position requires enabled output, fresh feedback, valid limits");
+      return;
     }
-    const bool ramp = i == 0 ? panPositionRampEnabled : tiltPositionRampEnabled;
-    const auto &servo = SERVO_CONFIG[i];
-    // Pot scale/offset is not yet calibrated to programmed angular travel.
-    // Ramp angular commands from the last commanded PWM, not pot voltage.
-    const float startAngle = continuous(i) ? feedbackAngle(fb, i) :
-      pulseToDeviceAngle(pulseUs[i], servo.minPulseUs, servo.maxPulseUs, minAngle(i), maxAngle(i)) - (i == 1 ? calibration.zeroDeg : 0);
-    const float measured = usesImu(i) ? latestTiltImu().angle[tiltImuAxis]-tiltImuZero : startAngle;
-    const float initialAngle = ramp ? measured : target;
-    const float initialPulse = continuous(i) ? float(neutralPulse(i)) : angularPositionPulse(i, initialAngle);
-    const float targetPulse = continuous(i) ? float(neutralPulse(i)) : angularPositionPulse(i, target);
-    const auto &c = SERVO_CONFIG[i];
-    if (!isfinite(initialPulse) || !isfinite(targetPulse) || initialPulse < c.minPulseUs || initialPulse > c.maxPulseUs || targetPulse < c.minPulseUs || targetPulse > c.maxPulseUs) {
-      queueControlMessage("Servo error: angle outside programmed PWM mapping"); return;
-    }
-    stopOutput(i);
-    if (!applyPulse(i, initialPulse)) { stopOutput(i); queueControlMessage("Servo error: position PWM unavailable"); return; }
-    rampPulseUs[i] = initialPulse; targetPulseUs[i] = uint32_t(lroundf(targetPulse));
-    positionSetpoint[i] = initialAngle; positionTarget[i] = target; positionActive[i] = true;
-    queueControlMessage("Servo position target applied"); return;
+    queueControlMessage(positionBreakaway[i].active ? "Servo position target applied; breakaway spike armed" : "Servo position target applied");
+    return;
   }
   if (!strncmp(line, "SERVO OVERSPEED ", 16)) {
     char axis[8] = {}; int value = -1, end = 0;

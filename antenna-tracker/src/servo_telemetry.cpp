@@ -45,13 +45,14 @@ void fillServoStatus(StatusFrame &frame) {
     auto &p = frame.pid[i];
     if (positionActive[i]) {
       const auto &pp = positionPid[i];
+      const bool kicking = positionBreakaway[i].active;
       p.setpoint = positionSetpoint[i]; p.error = pp.error;
       p.p = pp.p * direction; p.i = pp.integral * direction; p.d = pp.d * direction;
       p.ff = usesImu(i) ? angularPositionPulse(i, positionSetpoint[i]) - neutralPulse(i) : pp.deadband * direction;
-      p.startup = 0;
+      p.startup = kicking ? positionBreakaway[i].sign * positionBreakaway[i].offsetUs * direction : 0;
       p.request = usesImu(i) ? angularPositionPulse(i, positionSetpoint[i]) - neutralPulse(i) + pp.request * direction : pp.request * direction;
       p.output = active[i] ? (i == 1 ? actualTiltPulseUs : float(pulses[i])) - neutralPulse(i) : 0;
-      p.active = active[i]; p.phase = 0; p.mode = 1;
+      p.active = active[i]; p.phase = kicking ? 2 : 0; p.mode = 1;
     } else {
       p.setpoint = trajectoryVelocity[i]; p.error = spd.errorTerm;
       p.p = direction * spd.pTerm; p.i = direction * spd.iTerm; p.d = 0;
@@ -102,9 +103,17 @@ void fillServoStatus(StatusFrame &frame) {
   frame.cfg_pan_ff = panContinuousUsPerDegPerSec; frame.cfg_pan_rise = panPwmRiseUsPerSec;
   frame.cfg_pan_fall = panPwmFallUsPerSec; frame.cfg_pan_search = panStartupSearchUsPerSec;
   frame.cfg_pan_search_max = panStartupSearchMaxUs; frame.cfg_pan_brake = panBrakingConfirmSeconds;
+  frame.cfg_pan_breakaway_us = panPositionBreakawayOffsetUs;
+  frame.cfg_pan_breakaway_ms = panPositionBreakawayDurationMs;
+  frame.cfg_pan_kp_near = panPositionKpNear;
+  frame.cfg_pan_cap_near = panPositionCapNearUs;
+  frame.cfg_pan_schedule_deg = panPositionScheduleDeg;
+  frame.cfg_pan_brk_min_scale = panPositionBreakawayMinScale;
+  frame.cfg_pan_settle_deg = panPositionSettleDeg;
   frame.cfg_adc_sample_hz = adcSampleHz;
   frame.cfg_adc_stream = adcStreamEnabled() ? 1 : 0;
   frame.cfg_wifi_ap = WIFI_ACCESS_POINT ? 1 : 0;
+  frame.cfg_pan_fb = int32_t(panPositionFeedback);
 }
 
 void printServoStates() {
