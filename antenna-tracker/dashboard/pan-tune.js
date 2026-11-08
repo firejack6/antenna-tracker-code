@@ -868,25 +868,40 @@ const panTune = (() => {
     const ctx = canvas.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, width, height);
-    const pad = { left: 46, right: 10, top: 12, bottom: 22 };
-    const w = width - pad.left - pad.right, h = height - pad.top - pad.bottom;
     const span = Number(document.getElementById('window')?.value || 30);
     const now = Date.now() / 1000;
     const hidden = options.hidden || new Set();
+    const rightAxis = options.rightAxis instanceof Set
+      ? options.rightAxis
+      : new Set(options.rightAxis || []);
     const wrapBreak = options.wrapBreak;
     const points = series.map((s, i) => hidden.has(i) ? [] : s.filter(p => p && now - p.t <= span));
-    const values = [];
-    for (const pts of points) {
-      for (const p of pts) if (Number.isFinite(p.v)) values.push(p.v);
+    const leftValues = [];
+    const rightValues = [];
+    points.forEach((pts, i) => {
+      const bucket = rightAxis.has(i) ? rightValues : leftValues;
+      for (const p of pts) if (Number.isFinite(p.v)) bucket.push(p.v);
+    });
+    const hasRight = rightValues.length > 0;
+    const pad = { left: 46, right: hasRight ? 40 : 10, top: 12, bottom: 22 };
+    const w = width - pad.left - pad.right, h = height - pad.top - pad.bottom;
+    function scale(values, fixed) {
+      if (fixed) return { low: fixed.low, high: fixed.high };
+      let low = 0, high = 1;
+      if (values.length) {
+        low = Math.min(...values);
+        high = Math.max(...values);
+        if (low === high) { low -= 1; high += 1; }
+        const margin = (high - low) * 0.12;
+        low -= margin; high += margin;
+      }
+      return { low, high };
     }
-    let low = 0, high = 1;
-    if (values.length) {
-      low = Math.min(...values);
-      high = Math.max(...values);
-      if (low === high) { low -= 1; high += 1; }
-      const margin = (high - low) * 0.12;
-      low -= margin; high += margin;
-    }
+    const left = scale(leftValues);
+    // Far mode / unit flags: pin 0–1 so the step fills the right axis.
+    const right = scale(rightValues, options.rightFixed || null);
+    let { low, high } = left;
+    let lowR = right.low, highR = right.high;
     ctx.font = '10px Segoe UI, sans-serif';
     for (let i = 0; i < 4; i++) {
       const y = pad.top + h * i / 3;
@@ -894,19 +909,25 @@ const panTune = (() => {
       ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke();
       ctx.fillStyle = '#91a4bb'; ctx.textAlign = 'right';
       ctx.fillText((high - (high - low) * i / 3).toFixed(options.decimals ?? 1), pad.left - 6, y + 3);
+      if (hasRight) {
+        ctx.fillStyle = '#c5d0dc'; ctx.textAlign = 'left';
+        ctx.fillText((highR - (highR - lowR) * i / 3).toFixed(options.rightDecimals ?? 0), width - pad.right + 6, y + 3);
+      }
     }
     ctx.fillStyle = '#91a4bb'; ctx.textAlign = 'left';
     ctx.fillText(`−${span}s`, pad.left, height - 4);
     ctx.textAlign = 'right'; ctx.fillText('now', width - pad.right, height - 4);
-    if (!values.length) {
+    if (!leftValues.length && !rightValues.length) {
       ctx.textAlign = 'center';
       ctx.fillText('Select a trace in the legend', pad.left + w / 2, pad.top + h / 2);
       return;
     }
     const xOf = t => pad.left + ((t - (now - span)) / span) * w;
-    const yOf = v => pad.top + (1 - (v - low) / (high - low)) * h;
+    const yOfLeft = v => pad.top + (1 - (v - low) / (high - low)) * h;
+    const yOfRight = v => pad.top + (1 - (v - lowR) / (highR - lowR)) * h;
     points.forEach((pts, i) => {
       if (pts.length < 2) return;
+      const yOf = rightAxis.has(i) ? yOfRight : yOfLeft;
       ctx.strokeStyle = options.colors?.[i] || '#61e2bd';
       ctx.lineWidth = 1.6;
       ctx.beginPath();
@@ -926,13 +947,14 @@ const panTune = (() => {
     });
     if (typeof ChartHover !== 'undefined') {
       ChartHover.finish(ctx, canvas, {
-        pad, width, height, low, high,
+        pad, width, height, low, high, lowR, highR,
         decimals: options.decimals ?? 1,
         t0: now - span, t1: now,
         series: points.map((pts, i) => ({
           label: options.labels?.[i] || `Trace ${i + 1}`,
           color: options.colors?.[i] || '#61e2bd',
           points: pts,
+          right: rightAxis.has(i),
         })).filter((_, i) => !hidden.has(i)),
       });
     }
@@ -1019,6 +1041,10 @@ const panTune = (() => {
       colors: legendDefs.schedule.map(([, c]) => c),
       labels: legendDefs.schedule.map(([label]) => label),
       decimals: 2, hidden: hiddenTraces.schedule,
+      // Far mode is 0/1 — own axis so it isn't crushed by |Error|° / Eff Kp.
+      rightAxis: new Set([5]),
+      rightFixed: { low: -0.05, high: 1.05 },
+      rightDecimals: 0,
     });
   }
 

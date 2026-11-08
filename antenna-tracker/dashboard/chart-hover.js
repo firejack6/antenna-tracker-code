@@ -61,7 +61,9 @@
       const text = Number.isFinite(hit.v) ? hit.v.toFixed(decimals) : '—';
       lines.push(`${trace.label}: ${text}`);
       rowColors.push(trace.color || '#e7eef8');
-      const y = plotTop + (1 - (hit.v - meta.low) / (meta.high - meta.low)) * (plotBottom - plotTop);
+      const low = trace.right ? (meta.lowR ?? meta.low) : meta.low;
+      const high = trace.right ? (meta.highR ?? meta.high) : meta.high;
+      const y = plotTop + (1 - (hit.v - low) / (high - low)) * (plotBottom - plotTop);
       if (Number.isFinite(y) && y >= plotTop && y <= plotBottom) {
         ctx.fillStyle = trace.color || '#e7eef8';
         ctx.beginPath();
