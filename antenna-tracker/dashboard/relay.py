@@ -24,7 +24,8 @@ from recording import Recorder
 from dropouts import DropoutMonitor
 from temperature_log import TemperatureLog
 from status_protocol import decode_status
-from track_sim import TrackSim, list_flights, list_sites
+from track_sim import TrackSim, list_flights, list_sites, save_site
+from opensky_config import load_credentials, public_status, save_credentials
 
 ROOT = Path(__file__).resolve().parent
 # Cap /api/state sample backlog so a cold browser poll cannot download megabytes.
@@ -228,6 +229,15 @@ class Relay:
         self.temperature_log = TemperatureLog(ROOT / 'health-logs')
         self.temperature = None
         self.track_sim = TrackSim(self)
+        self.last_ui_at = 0.0  # wall time of last dashboard /api/state poll
+
+    def note_ui_poll(self):
+        self.last_ui_at = time.time()
+
+    def ui_idle_s(self):
+        if not self.last_ui_at:
+            return None
+        return max(0.0, time.time() - self.last_ui_at)
 
     def corrupt_packet(self):
         with self.lock:
@@ -584,15 +594,13 @@ class Relay:
         if not all(math.isfinite(v) for v in (lat, lon, alt)) or abs(lat) > 90 or abs(lon) > 180 or not 0 <= alt <= 10000:
             raise ValueError('Track HOME lat/lon/alt out of range')
         decl = float(data.get('decl', data.get('mag_declination', 0)) or 0)
-        align = float(data.get('pan_align', 0) or 0)
-        invert = 1 if data.get('pan_invert') else 0
-        if not math.isfinite(decl) or abs(decl) > 360 or not math.isfinite(align) or abs(align) > 360:
-            raise ValueError('Track DECL/ALIGN out of range')
+        if not math.isfinite(decl) or abs(decl) > 360:
+            raise ValueError('Track DECL out of range')
+        # Mag-only tracking: force Mag PAN feedback and never push pot ALIGN/INVERT.
+        self.command_servo_position({'axis': 'PAN', 'mode': 'MAG'}, gains='feedback')
         self._queue_track_line(f'TRACK HOME {lat:g} {lon:g} {alt:g}\n')
         self._queue_track_line(f'TRACK DECL {decl:g}\n')
-        self._queue_track_line(f'TRACK ALIGN {align:g}\n')
-        self._queue_track_line(f'TRACK INVERT {invert}\n')
-        return dict(ok=True, message='TRACK HOME/DECL/ALIGN queued')
+        return dict(ok=True, message='TRACK HOME/DECL queued (Mag feedback)')
 
     def command_track_target(self, data):
         lat, lon, alt = data.get('lat'), data.get('lon'), data.get('alt')
@@ -621,6 +629,43 @@ class Relay:
         on = 1 if enabled else 0
         self._queue_track_line(f'TRACK PREDICT {on}\n')
         return dict(ok=True, enabled=bool(on))
+
+    def command_track_search(self, data):
+        enabled = data.get('enabled', data.get('on', True))
+        if type(enabled) not in (bool, int):
+            raise ValueError('Track SEARCH needs enabled bool')
+        on = 1 if enabled else 0
+        self._queue_track_line(f'TRACK SEARCH {on}\n')
+        out = dict(ok=True, enabled=bool(on))
+        speed = data.get('speed', data.get('speed_deg_s'))
+        if speed is not None:
+            if type(speed) not in (int, float) or not math.isfinite(speed) or not 5 <= float(speed) <= 120:
+                raise ValueError('Track SEARCH speed needs 5..120 °/s')
+            self._queue_track_line(f'TRACK SEARCH_SPEED {float(speed):g}\n')
+            out['speed'] = float(speed)
+        gap = data.get('gap', data.get('gap_s'))
+        if gap is not None:
+            if type(gap) not in (int, float) or not math.isfinite(gap) or not 0.5 <= float(gap) <= 60:
+                raise ValueError('Track SEARCH gap needs 0.5..60 s')
+            self._queue_track_line(f'TRACK SEARCH_GAP {float(gap):g}\n')
+            out['gap'] = float(gap)
+        return out
+
+    def command_track_search_speed(self, data):
+        speed = data.get('speed', data.get('speed_deg_s'))
+        if type(speed) not in (int, float) or not math.isfinite(speed) or not 5 <= float(speed) <= 120:
+            raise ValueError('Track SEARCH_SPEED needs 5..120 °/s')
+        self._queue_track_line(f'TRACK SEARCH_SPEED {float(speed):g}\n')
+        return dict(ok=True, speed=float(speed))
+
+    def command_track_search_gap(self, data):
+        gap = data.get('gap', data.get('gap_s'))
+        if gap is None:
+            gap = data.get('seconds')
+        if type(gap) not in (int, float) or not math.isfinite(gap) or not 0.5 <= float(gap) <= 60:
+            raise ValueError('Track SEARCH_GAP needs 0.5..60 s')
+        self._queue_track_line(f'TRACK SEARCH_GAP {float(gap):g}\n')
+        return dict(ok=True, gap=float(gap))
 
     def command_servo_pwm_sweep(self, data):
         axis, action = data.get('axis'), data.get('action')
@@ -881,7 +926,10 @@ class Relay:
                 if last[0] > first[0] and time.monotonic() - last[0] < 1:
                     received_hz = (last[1] - first[1]) / (last[0] - first[0])
             track_sim = self.track_sim.snapshot()
+            idle = self.ui_idle_s()
             return dict(status=self.status, message=self.message, mode=self.mode,
+                        ui_idle_s=idle,
+                        opensky=public_status(),
                         servo_safety=dict(self.servo_safety) if self.servo_safety else None,
                         safety_command=dict(self.safety_command) if self.safety_command else None,
                         servo_inhibit=self.servo_inhibit,
@@ -1312,9 +1360,15 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/state":
             try:
                 since = int(parse_qs(url.query).get("since", ["0"])[0])
+                self.server.relay.note_ui_poll()
                 return self.reply(self.server.relay.snapshot(since))
             except ValueError:
                 return self.reply({"error": "Invalid cursor"}, 400)
+        if url.path == "/api/ui-idle":
+            idle = self.server.relay.ui_idle_s()
+            return self.reply(dict(idle_s=idle, last_ui_at=self.server.relay.last_ui_at or None))
+        if url.path == "/api/opensky-credentials":
+            return self.reply(public_status())
         if url.path == "/api/config":
             return self.reply(self.server.relay.effective_config())
         if url.path == '/api/adc-export':
@@ -1468,6 +1522,16 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(self.server.relay.track_sim.stop_sim(send_off=bool(data.get('off', True))))
                 else:
                     raise ValueError("track-sim action must be start or stop")
+            elif self.path == '/api/opensky-credentials':
+                client_id = str(data.get('client_id') or '').strip()
+                # Empty secret string means "leave existing secret unchanged".
+                if 'client_secret' in data and data.get('client_secret') not in (None, ''):
+                    secret = str(data.get('client_secret'))
+                else:
+                    secret = None
+                self.reply(save_credentials(client_id, secret))
+            elif self.path == '/api/track-site':
+                self.reply(save_site(data))
             elif self.path == '/api/track-home':
                 self.reply(self.server.relay.command_track_home(data))
             elif self.path == '/api/track-target':
@@ -1478,6 +1542,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(self.server.relay.command_track_lead(data))
             elif self.path == '/api/track-predict':
                 self.reply(self.server.relay.command_track_predict(data))
+            elif self.path == '/api/track-search':
+                self.reply(self.server.relay.command_track_search(data))
+            elif self.path == '/api/track-search-speed':
+                self.reply(self.server.relay.command_track_search_speed(data))
+            elif self.path == '/api/track-search-gap':
+                self.reply(self.server.relay.command_track_search_gap(data))
             else:
                 self.reply({"error": "Not found"}, 404)
         except (ValueError, TypeError) as exc:
@@ -1500,6 +1570,7 @@ def main():
     options = args.parse_args()
     server = DashboardServer((options.host, options.port), Handler)
     server.relay = Relay()
+    server.relay.http_port = server.server_port  # radio_feed child POSTs track-target here
     url = f"http://{options.host}:{server.server_port}"
     print("Sensor dashboard: " + url + " (Ctrl+C to stop)", flush=True)
     if not options.no_browser:

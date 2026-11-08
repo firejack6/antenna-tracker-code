@@ -2,13 +2,13 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Antenna tracker · Sensor dashboard</title>
+  <title>Antenna tracker</title>
   <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
   <script src="/vendor/leaflet/leaflet.js" defer></script><script src="/device-map.js" defer></script><script src="/orientation.js" defer></script><script src="/chart-hover.js" defer></script><script src="/pan-tune.js" defer></script>
   <link rel="stylesheet" href="/style.css"><script src="/channel-scaling.js" defer></script><script src="/app.js" defer></script>
 </head>
-<body>
-<header><div><div class="eyebrow">ANTENNA TRACKER / TELEMETRY</div><h1>Sensor dashboard<span class="pulse">●</span></h1><p>ADS7953 · BMI323 · BMM350</p></div><div class="header-right"><span id="status" class="badge">Disconnected</span><div id="freshness">No samples received</div></div></header>
+<body class="track-view map-view">
+<header><div><div class="eyebrow">ANTENNA TRACKER</div><h1>Antenna tracker<span class="pulse">●</span></h1><p>Track · Tune · Sensors · Advanced</p></div><div class="header-right"><span id="status" class="badge">Disconnected</span><div id="freshness">No samples received</div></div></header>
 <main>
   <section class="panel connection" aria-label="Connection settings">
     <form id="connection-form">
@@ -69,7 +69,7 @@
     <div><h3>Position · degrees</h3><div id="pid-position-legend" class="trace-legend"></div><canvas id="pid-position-chart" aria-label="Servo position and angle limits over time" role="img"></canvas></div>
     <div><h3>PID output · µs from neutral</h3><div id="pid-output-legend" class="trace-legend"></div><canvas id="pid-output-chart" aria-label="PID contributions and PWM offset over time" role="img"></canvas></div></div>
     <p class="plot-note">All plots use the history window above and controller timestamps. Click legends to toggle traces. Feedforward includes deadband compensation; D is zero. Position lines break at the pot wrap. PWM output is shown as offset from neutral; OFF is zero.</p></section>
-  <div class="imu-grid">
+  <div class="imu-grid imu-sensor-grid">
     <section class="panel"><div class="section-heading"><div><div class="eyebrow">BMI323</div><h2>Acceleration</h2></div><span class="unit">g</span></div><div id="accel-values" class="axis-values"></div><canvas id="accel-chart" aria-label="Acceleration X Y Z over time" role="img"></canvas></section>
     <section class="panel"><div class="section-heading"><div><div class="eyebrow">BMI323</div><h2>Angular velocity</h2></div><span class="unit">°/s</span></div><div id="gyro-values" class="axis-values"></div><canvas id="gyro-chart" aria-label="Gyroscope X Y Z over time" role="img"></canvas></section>
     <section class="panel"><div class="section-heading"><div><div class="eyebrow">BMM350</div><h2>Magnetic field</h2></div><span class="unit">µT</span></div><div id="mag-values" class="axis-values"></div><canvas id="mag-chart" aria-label="Magnetic field X Y Z over time" role="img"></canvas></section>

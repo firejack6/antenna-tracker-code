@@ -1,5 +1,5 @@
-/* Device location + azimuth. Go-to closes the loop on mag heading (world frame).
-   PAN pot is the actuator only — its degree scale is not trusted as truth. */
+/* Device location + azimuth. Map red ray / Az FW = firmware feedback→map
+   (Mag: motion.angle+decl). Never substitute browser mag for the dish ray. */
 const mapAzimuthSmoothingSeconds = 0.35;
 function smoothMapAzimuth(previous, value, seconds) {
   if (!Number.isFinite(previous)) return (value % 360 + 360) % 360;
@@ -10,55 +10,60 @@ function smoothMapAzimuth(previous, value, seconds) {
 const deviceMap = (() => {
   const main = document.querySelector('main');
   const tabs = document.createElement('nav'); tabs.className = 'workspace-tabs'; tabs.setAttribute('aria-label', 'Dashboard views');
-  tabs.innerHTML = '<button type="button" data-view="controls" aria-pressed="true">Controls</button><button type="button" data-view="map" aria-pressed="false">Map</button>';
+  tabs.innerHTML = '<button type="button" data-view="track" aria-pressed="true">Track</button><button type="button" data-view="sensors" aria-pressed="false">Sensors</button><button type="button" data-view="advanced" aria-pressed="false">Advanced</button>';
   main.prepend(tabs);
-  const panel = document.createElement('section'); panel.className = 'panel map-panel'; panel.hidden = true;
-  panel.innerHTML = `<div class="section-heading"><h2>Device map</h2><button type="button" id="map-center" class="secondary">Center on device</button></div>
-    <form id="device-location-form"><div class="map-fields">
-    <label class="track-flight-select">Saved coords<select id="device-site"><option value="">Custom / enter below</option></select></label>
-    <label>Latitude (°)<input id="device-latitude" type="number" min="-90" max="90" step="any" required placeholder="e.g. 41.88"></label>
-    <label>Longitude (°)<input id="device-longitude" type="number" min="-180" max="180" step="any" required placeholder="e.g. -87.63"></label>
-    <label>Altitude AGL (m)<input id="device-altitude" type="number" min="0" max="10000" step="any" value="0" required title="Antenna height above ground. Elevation = atan2(target AGL − this, range)."></label>
-    <label>PAN→north align (°)<input id="device-pan-align" type="number" min="-360" max="360" step="any" value="0" required title="From Align click or Seed from mag."></label>
-    <label>Mag declination (°)<input id="device-mag-declination" type="number" min="-360" max="360" step="any" value="0" title="Added to magnetic heading for Seed from mag (true ≈ mag + declination)."></label>
-    <label>Ray length (m)<input id="device-ray-length" type="number" min="1" max="100000" step="any" value="1000" required></label>
-    <label class="map-check"><input id="device-pan-invert" type="checkbox"> Invert PAN vs map azimuth</label></div>
-    <div class="buttons">
-      <button type="submit">Save device location</button>
-      <button type="button" id="map-seed-mag" class="secondary">Seed align from mag</button>
-    </div>
-    <p id="device-location-status" role="status">Enter device coordinates. Saved in this browser; this is not a live GPS fix.</p></form>
-    <p id="device-aim-source" class="map-aim-source" role="status">AIM SOURCE: mag heading (closed-loop). Pot = actuator only.</p>
-    <p id="device-map-heading" role="status">Waiting for sensors</p>
-    <p class="plot-note"><strong>Go-to / Circle / Rocket / Sim send TRACK TARGET lat lon alt</strong> — the board aims. Tune ±steps still use angle commands. <em>Align</em> / <em>Seed</em> set declination; Save also queues TRACK HOME.</p>
+  // Keep Connect at the top of main on every tab.
+  const connection = document.querySelector('.connection');
+  if (connection) tabs.after(connection);
 
-    <div class="track-tools" aria-label="Synthetic tracking">
-      <div class="section-heading"><div><div class="eyebrow">SYNTHETIC TARGET</div><h2>Track tools</h2></div>
-        <div class="buttons track-mode-buttons">
-          <button type="button" data-track-mode="off" aria-pressed="true">Off</button>
-          <button type="button" data-track-mode="align" aria-pressed="false">Align</button>
-          <button type="button" data-track-mode="goto" aria-pressed="false">Go to click</button>
-          <button type="button" data-track-mode="circle" aria-pressed="false">Circle</button>
-          <button type="button" data-track-mode="rocket" aria-pressed="false">Rocket</button>
-          <button type="button" id="track-run-sim" class="secondary">Replay flight</button>
-          <button type="button" id="track-stop" class="secondary">Stop</button>
-        </div></div>
-      <p class="plot-note">Align does not move servos — it teaches the map where the dish is pointing. Go-to/Circle/Rocket/Replay send <strong>TRACK TARGET lat lon alt only</strong>. Save pushes TRACK HOME to the board. Angle targets are Tune-only. Speed/gains/feedback stay whatever you last set in Tune. Flight replay uses each file’s native timestamps (no 10&nbsp;Hz resample).</p>
-      <div class="map-fields track-fields">
-        <label class="track-flight-select">Flight<select id="track-flight"><option value="">Loading…</option></select></label>
-        <label class="map-check"><input id="track-predict" type="checkbox" checked> Predict (lead target)</label>
-        <label>Lead (s)<input id="track-lead" type="number" min="0" max="2.5" step="0.05" value="0.35" title="Extra prediction lead. Board also adds ~0.15s latency + half the GPS interval."></label>
-        <label>Target altitude AGL (m)<input id="track-altitude" type="number" min="0" max="100000" step="any" value="500" title="Same AGL frame as device altitude. El uses (target − device)."></label>
-        <label>Circle radius (m)<input id="track-radius" type="number" min="10" max="100000" step="any" value="1000"></label>
-        <label>Circle rate (°/s)<input id="track-circle-rate" type="number" min="0.1" max="90" step="any" value="6"></label>
-        <label>Rocket apogee (m)<input id="track-rocket-apogee" type="number" min="10" max="100000" step="any" value="2000"></label>
-        <label>Rocket boost (s)<input id="track-rocket-boost" type="number" min="0.5" max="60" step="any" value="3"></label>
-        <label>Rocket descent (s)<input id="track-rocket-descent" type="number" min="1" max="600" step="any" value="25"></label>
-        <label>Rocket drift (m)<input id="track-rocket-drift" type="number" min="0" max="50000" step="any" value="200"></label>
+  // Track (default): ops bar + map + plots
+  const panel = document.createElement('section'); panel.className = 'panel map-panel';
+  panel.innerHTML = `
+    <div class="track-ops" aria-label="Tracking controls">
+      <button type="button" id="track-arm" class="track-chip secondary">Enable servos</button>
+      <label class="track-ops-field">Site<select id="track-site-ops"><option value="">Custom (Advanced)</option></select></label>
+      <button type="button" id="track-save-site" class="secondary" title="Save current lat/lon/alt under a name in the Site list">Save location</button>
+      <button type="button" id="track-run-sim">Start tracking</button>
+      <button type="button" id="track-stop" class="secondary">Stop</button>
+      <button type="button" id="map-center" class="secondary">Center</button>
+      <button type="button" id="track-dropout-warn" class="track-dropout-lamp" aria-live="polite" title="Track data lamp — click to open the OpenSky feed log">DATA</button>
+    </div>
+    <div class="track-source" aria-label="Track data source">
+      <nav class="track-source-tabs" role="tablist" aria-label="Data source">
+        <button type="button" role="tab" data-track-source="serial" aria-selected="false">Serial</button>
+        <button type="button" role="tab" data-track-source="opensky" aria-selected="true">OpenSky</button>
+        <button type="button" role="tab" data-track-source="playback" aria-selected="false">Playback</button>
+      </nav>
+      <div class="track-source-panel" data-track-source-panel="serial" hidden>
+        <p class="plot-note">Radio / serial GPS → TRACK TARGET is not wired yet. Board link stays under <strong>Connect</strong> above. Use OpenSky or Playback for now.</p>
       </div>
-      <p id="track-status" role="status">Synthetic tracking off.</p>
+      <div class="track-source-panel track-ops" data-track-source-panel="opensky">
+        <label class="track-ops-field" title="6-hex ICAO24 / Mode S address">ICAO24<input id="track-icao" type="text" maxlength="6" placeholder="406f72" autocomplete="off" spellcheck="false"></label>
+        <label class="track-ops-field track-ops-poll" title="Toggle OpenSky polling on/off (min 5s authenticated / 10s anonymous). Independent of Start tracking.">
+          OpenSky poll
+          <span class="track-poll-row">
+            <input id="track-opensky-poll" type="checkbox">
+            <input id="track-opensky-interval" type="number" min="5" max="120" step="1" value="5" aria-label="Poll interval seconds">
+            <span class="track-poll-unit">s</span>
+          </span>
+        </label>
+        <p class="plot-note track-source-hint">Poll = watch positions in the log/map. Start tracking = send TRACK TARGET and point (servos on). Credentials in Advanced.</p>
+        <div class="track-feed-log-wrap">
+          <div class="track-feed-log-head">
+            <strong>Feed log</strong>
+            <button type="button" id="track-opensky-log-clear" class="secondary">Clear</button>
+          </div>
+          <pre id="track-opensky-log" class="track-feed-log" aria-live="polite">Waiting for OpenSky polls…</pre>
+        </div>
+      </div>
+      <div class="track-source-panel track-ops" data-track-source-panel="playback" hidden>
+        <label class="track-ops-field">Flight CSV<select id="track-flight"><option value="">Loading…</option></select></label>
+        <p class="plot-note track-source-hint">Fake / recorded flight replay (realtime radio-feed process).</p>
+      </div>
     </div>
-
+    <p id="track-status" role="status">Pick OpenSky or Playback, set site, enable servos, then Start tracking.</p>
+    <p id="device-aim-source" class="map-aim-source" role="status">FW feedback: waiting for board pan_fb…</p>
+    <p id="device-map-heading" role="status">Waiting for sensors</p>
     <div class="map-viewport"><div id="device-map" aria-label="Device location and dish pointing map"></div>
     <aside class="map-pointing" aria-label="Pointing error">
       <strong id="map-pointing-title">Pointing</strong>
@@ -66,7 +71,7 @@ const deviceMap = (() => {
       <span id="map-pointing-tilt">TILT —</span>
       <span id="map-pointing-track">Track —</span>
       <span id="map-pointing-offset">Align —</span>
-      <small id="map-pointing-hint">Align first so red can meet gold.</small>
+      <small id="map-pointing-hint">Align in Advanced if gold does not meet red.</small>
     </aside>
     <aside class="map-elevation" aria-label="Live device elevation">
       <strong id="map-elevation-value">Elevation unavailable</strong><span id="map-elevation-target"></span>
@@ -79,22 +84,92 @@ const deviceMap = (() => {
     </aside></div><p id="map-tile-status" role="status"></p>
     <div class="map-track-plots" aria-label="Track distance and angle plots">
       <div>
-        <h3>Distance <small>horizontal range · altitude AGL</small></h3>
+        <h3>Distance <small>range · alt</small></h3>
         <div class="mini-legend"><span style="color:#69adff">Range m</span><span style="color:#f5bd4f">Alt m</span></div>
         <canvas id="map-distance-chart" class="chart-hoverable" role="img" aria-label="Rocket horizontal range and altitude versus time"></canvas>
       </div>
       <div>
-        <h3>Azimuth <small>dish · GPS target · predicted</small></h3>
-        <div class="mini-legend"><span style="color:#ef3038">Az dish</span><span style="color:#f5bd4f">Az GPS</span><span style="color:#61e2bd">Az predict</span></div>
-        <canvas id="map-az-chart" class="chart-hoverable" role="img" aria-label="Dish, GPS target, and predicted azimuth versus time"></canvas>
+        <h3>Azimuth <small id="map-az-chart-sub">FW dish · GPS</small></h3>
+        <div class="mini-legend"><span style="color:#ef3038">Az FW</span><span style="color:#f5bd4f">Az GPS</span><span id="map-az-cmd-legend" style="color:#61e2bd" hidden>Az predict</span></div>
+        <canvas id="map-az-chart" class="chart-hoverable" role="img" aria-label="Dish and GPS target azimuth versus time"></canvas>
       </div>
       <div>
-        <h3>Elevation <small>dish · GPS target · predicted</small></h3>
-        <div class="mini-legend"><span style="color:#69adff">El dish</span><span style="color:#a88bfa">El GPS</span><span style="color:#61e2bd">El predict</span></div>
-        <canvas id="map-el-chart" class="chart-hoverable" role="img" aria-label="Dish, GPS target, and predicted elevation versus time"></canvas>
+        <h3>Elevation <small id="map-el-chart-sub">dish · GPS</small></h3>
+        <div class="mini-legend"><span style="color:#69adff">El dish</span><span style="color:#a88bfa">El GPS</span><span id="map-el-cmd-legend" style="color:#61e2bd" hidden>El predict</span></div>
+        <canvas id="map-el-chart" class="chart-hoverable" role="img" aria-label="Dish and GPS target elevation versus time"></canvas>
       </div>
     </div>`;
-  tabs.after(panel);
+  (connection || tabs).after(panel);
+
+  // Advanced: site/HOME, predict, synthetic modes (health/ADC stay in main, shown via CSS)
+  const advanced = document.createElement('section');
+  advanced.className = 'panel advanced-panel';
+  advanced.hidden = true;
+  advanced.innerHTML = `
+    <div class="section-heading"><div><div class="eyebrow">SETUP</div><h2>Site and HOME</h2></div></div>
+    <form id="device-location-form"><div class="map-fields">
+      <label class="track-flight-select">Saved coords<select id="device-site"><option value="">Custom / enter below</option></select></label>
+      <label>Latitude (°)<input id="device-latitude" type="number" min="-90" max="90" step="any" required placeholder="e.g. 41.88"></label>
+      <label>Longitude (°)<input id="device-longitude" type="number" min="-180" max="180" step="any" required placeholder="e.g. -87.63"></label>
+      <label>Altitude AGL (m)<input id="device-altitude" type="number" min="0" max="10000" step="any" value="0" required></label>
+      <label>Mag declination (°)<input id="device-mag-declination" type="number" min="-360" max="360" step="any" value="0" title="true ≈ mag + decl. Landmark Align sets this. TRACK ignores pot align."></label>
+      <label>Ray length (m)<input id="device-ray-length" type="number" min="1" max="100000" step="any" value="1000" required></label>
+      <input id="device-pan-align" type="hidden" value="0">
+      <input id="device-pan-invert" type="checkbox" hidden>
+    </div>
+    <div class="buttons">
+      <button type="submit">Save device location</button>
+      <button type="button" id="device-save-named-site" class="secondary" title="Add current coordinates to the Site dropdown (same catalog as playback homes)">Save as named site</button>
+      <button type="button" id="map-seed-mag" class="secondary" title="Set declination 0 (assume mag ≈ true north). Prefer landmark Align if mag≠true.">Seed decl=0 from mag</button>
+    </div>
+    <p id="device-location-status" role="status">Enter device coordinates. Tracking uses mag heading − declination (no pot align).</p></form>
+
+    <div class="section-heading" style="margin-top:28px"><div><div class="eyebrow">OPENSKY</div><h2>Aircraft API credentials</h2></div></div>
+    <form id="opensky-creds-form" class="map-fields track-fields">
+      <label>Client ID<input id="opensky-client-id" type="text" autocomplete="off" spellcheck="false" value="your-opensky-client-id"></label>
+      <label>Client secret<input id="opensky-client-secret" type="password" autocomplete="new-password" placeholder="paste secret — leave blank to keep saved"></label>
+      <div class="buttons" style="grid-column:1/-1">
+        <button type="submit">Save OpenSky credentials</button>
+      </div>
+      <p id="opensky-creds-status" class="plot-note" style="grid-column:1/-1" role="status">Saved locally in dashboard/opensky_credentials.json (gitignored).</p>
+    </form>
+
+    <div class="section-heading" style="margin-top:28px"><div><div class="eyebrow">PREDICT</div><h2>Lead settings</h2></div></div>
+    <div class="map-fields track-fields">
+      <label class="map-check"><input id="track-predict" type="checkbox" checked> Predict (lead target)</label>
+      <label>Lead (s)<input id="track-lead" type="number" min="0" max="2.5" step="0.05" value="0.35" title="Extra prediction lead. Board also adds ~0.15s latency + half the GPS interval."></label>
+      <label class="map-check"><input id="track-search" type="checkbox" checked title="After the gap below with no parsable TRACK TARGET, sweep an expanding spiral from the last aim"> Spiral search on data loss</label>
+      <label>Search gap (s)<input id="track-search-gap" type="number" min="0.5" max="60" step="0.5" value="3" title="Seconds without a parsable TRACK TARGET before spiral search starts."></label>
+      <label>Search speed (°/s)<input id="track-search-speed" type="number" min="5" max="120" step="1" value="30" title="Spiral phase rate. Higher = faster sweep. Arms expand ~6° per turn up to 40°."></label>
+    </div>
+
+    <div class="track-tools" aria-label="Synthetic tracking extras">
+      <div class="section-heading"><div><div class="eyebrow">SYNTHETIC</div><h2>Map click modes</h2></div>
+        <div class="buttons track-mode-buttons">
+          <button type="button" data-track-mode="off" aria-pressed="true">Off</button>
+          <button type="button" data-track-mode="align" aria-pressed="false">Align</button>
+          <button type="button" data-track-mode="goto" aria-pressed="false">Go to click</button>
+          <button type="button" data-track-mode="circle" aria-pressed="false">Circle</button>
+          <button type="button" data-track-mode="rocket" aria-pressed="false">Rocket</button>
+        </div></div>
+      <div class="map-fields track-fields">
+        <label>Target altitude AGL (m)<input id="track-altitude" type="number" min="0" max="100000" step="any" value="500"></label>
+        <label>Circle radius (m)<input id="track-radius" type="number" min="10" max="100000" step="any" value="1000"></label>
+        <label>Circle rate (°/s)<input id="track-circle-rate" type="number" min="0.1" max="90" step="any" value="6"></label>
+        <label>Rocket apogee (m)<input id="track-rocket-apogee" type="number" min="10" max="100000" step="any" value="2000"></label>
+        <label>Rocket boost (s)<input id="track-rocket-boost" type="number" min="0.5" max="60" step="any" value="3"></label>
+        <label>Rocket descent (s)<input id="track-rocket-descent" type="number" min="1" max="600" step="any" value="25"></label>
+        <label>Rocket drift (m)<input id="track-rocket-drift" type="number" min="0" max="50000" step="any" value="200"></label>
+      </div>
+      <p class="plot-note">Align / Go-to / Circle / Rocket use map clicks. Flight replay lives on the Track tab.</p>
+    </div>
+    <p class="plot-note">Connection, health, servo PWM, PID and raw monitor are below on this tab. ADC / GPIO / IMU / sampling live on Sensors. Recording and orientation live on Track.</p>`;
+  panel.after(advanced);
+  // Keep Save stream + orientation on the Track surface (DOM order under the map/plots).
+  const recordingPanel = document.querySelector('.recording-panel');
+  const orientationPanel = document.querySelector('.orientation-panel');
+  if (recordingPanel) panel.after(recordingPanel);
+  if (orientationPanel) (recordingPanel || panel).after(orientationPanel);
   const el = id => document.getElementById(id);
   let config = null, map = null, marker = null, dishRay = null, magRay = null, targetRay = null;
   let heading = null, elevation = null, target = null, panAngle = null, panTarget = null;
@@ -103,6 +178,9 @@ const deviceMap = (() => {
   let trackMode = 'off', trackTimer = null, gotoTimer = null, trackBusy = false, lastCommandAt = 0;
   let targetMarker = null, padMarker = null, pathLine = null, pathPoints = [];
   let clickLatLng = null, runStartedAt = null, lastAim = null, alignReady = false;
+  let lastTargetAt = 0; // performance.now() when last parsable rocket fix arrived
+  let lastSimIndex = -1;
+  const TRACK_DROPOUT_WARN_S = 3;
   let lastHudDrawAt = 0, lastLeafletDrawAt = 0, leafletDrawTimer = null, lastPlotDrawAt = 0;
   // Rolling history for map plots (t = performance.now()/1000).
   const trackHist = [];
@@ -111,32 +189,53 @@ const deviceMap = (() => {
   const wrap180 = deg => ((deg + 180) % 360 + 360) % 360 - 180;
   const wrap360 = deg => ((deg % 360) + 360) % 360;
   const fmtErr = deg => `${deg >= 0 ? '+' : ''}${deg.toFixed(1)}°`;
-  let panFb = null; // 'MAG' | 'POT' | null from board effective_config
+  let panFb = null; // 'MAG' | 'POT' | null from board effective_config.pan_fb
   let lastCommandedLat = null, lastCommandedLon = null, lastCommandedAlt = null, lastCommandedAt = 0;
   let homePushedKey = null;
-  function magMapAzimuth() {
+  /** Browser-only mag→map (NOT the FW PID measurement — may disagree with panAngle). */
+  function browserMagMapAzimuth() {
     if (!config || !Number.isFinite(heading) || magStale) return null;
     return wrap360(heading + (config.magDeclination || 0));
   }
+  /**
+   * Dish map azimuth from what the firmware is actually closing on:
+   * Mag → motion.angle (filtered heading) + decl; Pot → pot° + align (world only if align set).
+   */
   function dishAzimuth() {
-    return magMapAzimuth();
+    if (!config) return null;
+    if (panFb === 'MAG') {
+      if (!Number.isFinite(panAngle) || stale) return null;
+      return wrap360(panAngle + (config.magDeclination || 0));
+    }
+    if (panFb === 'POT') {
+      if (!Number.isFinite(panAngle) || stale) return null;
+      // Without pot→north align, pot degrees are not a world azimuth.
+      if (!Number.isFinite(config.panAlign) || (config.panAlign === 0 && !config.panInvert)) {
+        return null;
+      }
+      return config.panInvert
+        ? wrap360(config.panAlign - panAngle)
+        : wrap360(panAngle + config.panAlign);
+    }
+    return null;
   }
-  /** Board PAN position target → true/map azimuth (same convention as TRACK). */
+  /** Board PAN position target → true/map azimuth (same frame as dishAzimuth). */
   function trueAzFromPanCmd(panCmd) {
     if (!config || !Number.isFinite(panCmd)) return null;
     if (panFb === 'MAG') return wrap360(panCmd + (config.magDeclination || 0));
+    if (panFb !== 'POT') return null;
+    if (!Number.isFinite(config.panAlign) || (config.panAlign === 0 && !config.panInvert)) return null;
     if (config.panInvert) return wrap360((config.panAlign || 0) - panCmd);
     return wrap360(panCmd + (config.panAlign || 0));
-  }
-  function potDishAzimuth() {
-    if (!config || !Number.isFinite(panAngle)) return null;
-    return config.panInvert
-      ? wrap360(config.panAlign - panAngle)
-      : wrap360(panAngle + config.panAlign);
   }
   /** Absolute mag heading the FW Mag PID should chase for a true map azimuth. */
   function magHeadingForTrueAz(azTrue) {
     return wrap360(azTrue - (config?.magDeclination || 0));
+  }
+  function fwFeedbackLabel() {
+    if (panFb === 'MAG') return 'MAG';
+    if (panFb === 'POT') return 'POT';
+    return 'UNKNOWN';
   }
 
   function destination(latitude, longitude, bearing, metres) {
@@ -158,14 +257,19 @@ const deviceMap = (() => {
   }
   function azEl(lat, lon, altM) {
     if (!config) throw Error('Save a device location first.');
-    if (magStale || !Number.isFinite(heading)) throw Error('Need fresh mag heading (FW Mag tracking).');
+    if (panFb === 'POT') throw Error('Board FW feedback is POT — enable Mag (Start tracking / track-home) before aiming.');
+    if (panFb === 'MAG') {
+      if (stale || !Number.isFinite(panAngle)) throw Error('Need fresh FW Mag measure (motion.angle).');
+    } else if (magStale || !Number.isFinite(heading)) {
+      throw Error('Need fresh mag heading (board pan_fb unknown).');
+    }
     const range = Math.max(1, haversineM(config.lat, config.lon, lat, lon));
     const azTrue = bearingDeg(config.lat, config.lon, lat, lon);
     const relAlt = altM - (Number.isFinite(config.alt) ? config.alt : 0);
     const elDeg = Math.max(-5, Math.min(85, Math.atan2(relAlt, range) * 180 / Math.PI));
     const dish = dishAzimuth();
     const azErr = Number.isFinite(dish) ? wrap180(azTrue - dish) : null;
-    // Same frame as Tune Mag ±steps / track_sim: absolute magnetic heading.
+    // Same frame as FW Mag PID: absolute magnetic heading.
     const pan = magHeadingForTrueAz(azTrue);
     return { pan, el: elDeg, azTrue, range, dish, azErr, mode: 'mag' };
   }
@@ -189,20 +293,30 @@ const deviceMap = (() => {
   async function pushTrackPredict() {
     const enabled = !!el('track-predict')?.checked;
     const lead = el('track-lead')?.valueAsNumber;
+    const search = !!el('track-search')?.checked;
+    const searchSpeed = el('track-search-speed')?.valueAsNumber;
+    const searchGap = el('track-search-gap')?.valueAsNumber;
     await trackApi('track-predict', { enabled });
     if (Number.isFinite(lead)) await trackApi('track-lead', { lead });
+    await trackApi('track-search', {
+      enabled: search,
+      speed: Number.isFinite(searchSpeed) ? searchSpeed : 30,
+      gap: Number.isFinite(searchGap) ? searchGap : 3,
+    });
     localStorage.setItem('track-predict', enabled ? '1' : '0');
     if (Number.isFinite(lead)) localStorage.setItem('track-lead', String(lead));
+    localStorage.setItem('track-search', search ? '1' : '0');
+    if (Number.isFinite(searchSpeed)) localStorage.setItem('track-search-speed', String(searchSpeed));
+    if (Number.isFinite(searchGap)) localStorage.setItem('track-search-gap', String(searchGap));
   }
   async function pushTrackHome(cfg = config, force = false) {
     if (!cfg) throw Error('Save a device location first.');
-    const key = [cfg.lat, cfg.lon, cfg.alt || 0, cfg.magDeclination || 0, cfg.panAlign || 0, !!cfg.panInvert].join('|');
+    // Mag-only: HOME + decl. Relay forces SERVO FEEDBACK PAN MAG; pot align unused.
+    const key = [cfg.lat, cfg.lon, cfg.alt || 0, cfg.magDeclination || 0].join('|');
     if (!force && homePushedKey === key) return;
     await trackApi('track-home', {
       lat: cfg.lat, lon: cfg.lon, alt: cfg.alt || 0,
       mag_declination: cfg.magDeclination || 0,
-      pan_align: cfg.panAlign || 0,
-      pan_invert: !!cfg.panInvert,
     });
     homePushedKey = key;
     try { await pushTrackPredict(); } catch { /* predict optional until board flashed */ }
@@ -217,6 +331,7 @@ const deviceMap = (() => {
     lastCommandedLon = lon;
     lastCommandedAlt = altM;
     lastCommandedAt = performance.now();
+    noteTargetFix();
     return true;
   }
   async function stopAxes() {
@@ -229,10 +344,13 @@ const deviceMap = (() => {
     if (mode === 'off' || mode === 'align') stopTrack(false);
     else if (prev === 'sim' && mode !== 'sim') stopTrack(false);
     trackMode = mode;
-    panel.querySelectorAll('[data-track-mode]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.trackMode === mode)));
+    document.querySelectorAll('[data-track-mode]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.trackMode === mode)));
     if (mode === 'off') {
       lastAim = null;
+      lastTargetAt = 0;
+      lastSimIndex = -1;
       setStatus('Synthetic tracking off.');
+      refreshDropoutWarn();
       draw();
     } else if (mode === 'align') {
       setStatus('Align armed — point dish at a landmark, click it. Sets mag declination (true − heading). No servo move.');
@@ -262,25 +380,37 @@ const deviceMap = (() => {
   let flightCatalog = [];
   let siteCatalog = [];
   function fillSiteSelect(selectedId) {
-    const sel = el('device-site');
-    if (!sel) return;
-    const keep = selectedId != null ? selectedId : sel.value;
-    sel.innerHTML = '<option value="">Custom / enter below</option>';
-    for (const s of siteCatalog) {
-      const opt = document.createElement('option');
-      opt.value = s.id;
-      opt.textContent = `${s.label} · ${Number(s.lat).toFixed(5)}, ${Number(s.lon).toFixed(5)}`;
-      sel.appendChild(opt);
+    const keep = selectedId != null ? selectedId : (el('device-site')?.value || el('track-site-ops')?.value || '');
+    for (const sel of [el('device-site'), el('track-site-ops')]) {
+      if (!sel) continue;
+      const blank = sel.id === 'track-site-ops' ? 'Custom (Advanced)' : 'Custom / enter below';
+      sel.innerHTML = `<option value="">${blank}</option>`;
+      for (const s of siteCatalog) {
+        const opt = document.createElement('option');
+        opt.value = s.id;
+        opt.textContent = `${s.label} · ${Number(s.lat).toFixed(5)}, ${Number(s.lon).toFixed(5)}`;
+        sel.appendChild(opt);
+      }
+      if (keep && siteCatalog.some(s => s.id === keep)) sel.value = keep;
     }
-    if (keep && siteCatalog.some(s => s.id === keep)) sel.value = keep;
+  }
+  function syncSiteSelects(fromId) {
+    const id = el(fromId)?.value || '';
+    for (const other of ['device-site', 'track-site-ops']) {
+      if (other !== fromId && el(other)) el(other).value = id;
+    }
+    localStorage.setItem('device-site', id);
   }
   function applySite(site, { save = false, note } = {}) {
     if (!site) return;
     el('device-latitude').value = site.lat;
     el('device-longitude').value = site.lon;
     el('device-altitude').value = Number.isFinite(site.alt) ? site.alt : 0;
-    const siteSel = el('device-site');
-    if (siteSel && site.id) siteSel.value = site.id;
+    if (site.id) {
+      if (el('device-site')) el('device-site').value = site.id;
+      if (el('track-site-ops')) el('track-site-ops').value = site.id;
+      localStorage.setItem('device-site', site.id);
+    }
     if (save) {
       try {
         saveConfig(read(), note || `Loaded ${site.label} — saved`);
@@ -292,6 +422,37 @@ const deviceMap = (() => {
       el('device-location-status').textContent =
         `Loaded ${site.label} (${Number(site.lat).toFixed(5)}, ${Number(site.lon).toFixed(5)}) — click Save device location to apply`;
     }
+  }
+  function coordsForNamedSite() {
+    try {
+      const c = read();
+      return { lat: c.lat, lon: c.lon, alt: c.alt };
+    } catch {
+      if (config) return { lat: config.lat, lon: config.lon, alt: config.alt };
+      throw Error('Enter lat/lon/alt in Advanced (or load a site) before saving.');
+    }
+  }
+  async function saveNamedSite() {
+    const coords = coordsForNamedSite();
+    const suggested = (el('device-site')?.selectedOptions?.[0]?.textContent || '')
+      .replace(/\s·\s.*/, '').trim();
+    const label = window.prompt('Name for this site location:', suggested && suggested !== 'Custom / enter below' && suggested !== 'Custom (Advanced)' ? suggested : '');
+    if (label == null) return;
+    const name = label.trim();
+    if (!name) throw Error('Site name required');
+    const response = await fetch('/api/track-site', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: name, lat: coords.lat, lon: coords.lon, alt: coords.alt }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw Error(body.error || response.statusText);
+    siteCatalog = body.sites || siteCatalog;
+    const site = body.site;
+    if (!site) throw Error('Server did not return the saved site');
+    fillSiteSelect(site.id);
+    applySite(site, { save: true, note: `Saved site “${site.label}”` });
+    setStatus(`Saved site “${site.label}” · ${Number(site.lat).toFixed(5)}, ${Number(site.lon).toFixed(5)}`);
   }
   function siteForFlight(file) {
     const flight = flightCatalog.find(f => f.file === file);
@@ -316,14 +477,24 @@ const deviceMap = (() => {
         sel.innerHTML = '<option value="">No flights in testdata/</option>';
         return;
       }
+      const replay = document.createElement('optgroup');
+      replay.label = 'Flight replay';
       for (const f of flightCatalog) {
         const opt = document.createElement('option');
         opt.value = f.file;
         const mins = f.duration_s >= 60 ? `${(f.duration_s / 60).toFixed(1)} min` : `${f.duration_s.toFixed(1)} s`;
         const homeTag = f.home ? ` · ${f.home.label}` : '';
-        opt.textContent = `${f.label} · ${f.points} pts · ${mins}${homeTag}`;
-        sel.appendChild(opt);
+        opt.textContent = `${f.label} · ${mins}${homeTag}`;
+        replay.appendChild(opt);
       }
+      sel.appendChild(replay);
+      const live = document.createElement('optgroup');
+      live.label = 'Live streams (soon)';
+      live.disabled = true;
+      const liveOpt = document.createElement('option');
+      liveOpt.textContent = 'Coming soon';
+      live.appendChild(liveOpt);
+      sel.appendChild(live);
       const pick = flightCatalog.some(f => f.file === prev) ? prev
         : (flightCatalog.find(f => /testdata1\.csv$/i.test(f.file)) || flightCatalog[0]).file;
       sel.value = pick;
@@ -336,70 +507,352 @@ const deviceMap = (() => {
       sel.innerHTML = `<option value="">${error.message}</option>`;
     }
   }
+  function servosArmed() {
+    const safety = document.getElementById('servo-safety-state')?.textContent || '';
+    return /Enabled/i.test(safety) && !/E-STOP/i.test(safety);
+  }
+  async function ensureSiteConfig() {
+    const siteId = el('track-site-ops')?.value || el('device-site')?.value;
+    if (siteId) {
+      const site = siteCatalog.find(s => s.id === siteId);
+      if (site) {
+        applySite(site, { save: false });
+        try {
+          saveConfig(read(), `Site ${site.label}`);
+          alignReady = true;
+        } catch (error) {
+          throw Error(error.message || 'Invalid site coordinates');
+        }
+      }
+    }
+    if (!config) throw Error('Choose a site (or save device location in Advanced) before starting.');
+  }
+  async function ensureSiteForStart() {
+    await ensureSiteConfig();
+    await pushTrackHome(config, true);
+    try { await pushTrackPredict(); } catch { /* board may be on older firmware */ }
+  }
+  let openskyPointing = false;
+  function refreshStartLabel() {
+    const btn = el('track-run-sim');
+    if (!btn) return;
+    const busy = trackSource === 'opensky' ? openskyPointing : trackMode === 'sim';
+    btn.textContent = busy ? 'Tracking…' : 'Start tracking';
+    btn.disabled = busy;
+  }
+  let trackSource = 'opensky'; // 'serial' | 'opensky' | 'playback'
+  function setTrackSource(source) {
+    if (!['serial', 'opensky', 'playback'].includes(source)) source = 'opensky';
+    trackSource = source;
+    document.querySelectorAll('[data-track-source]').forEach(btn => {
+      btn.setAttribute('aria-selected', String(btn.dataset.trackSource === source));
+    });
+    document.querySelectorAll('[data-track-source-panel]').forEach(panelEl => {
+      panelEl.hidden = panelEl.dataset.trackSourcePanel !== source;
+    });
+    try { localStorage.setItem('track-source', source); } catch { /* ignore */ }
+    const hints = {
+      serial: 'Serial radio GPS feed not wired yet — use OpenSky or Playback.',
+      opensky: 'OpenSky: Poll = watch positions. Start tracking = feed TRACK TARGET and point (servos on).',
+      playback: 'Playback: pick a flight CSV, enable servos, Start.',
+    };
+    if (!(trackSource === 'opensky' ? openskyPointing : trackMode === 'sim')) setStatus(hints[source] || '');
+  }
+  let openskyPollSyncing = false;
+  function syncOpenskyPollUi(on) {
+    const box = el('track-opensky-poll');
+    if (box && box.checked !== !!on) {
+      openskyPollSyncing = true;
+      box.checked = !!on;
+      openskyPollSyncing = false;
+    }
+    try { localStorage.setItem('track-opensky-enable', on ? '1' : '0'); } catch { /* ignore */ }
+  }
+  function openskyParams() {
+    const icao24 = (el('track-icao')?.value || '').trim().toLowerCase();
+    const interval = el('track-opensky-interval')?.valueAsNumber;
+    if (!/^[0-9a-f]{6}$/.test(icao24)) {
+      throw Error('ICAO24 must be 6 hex characters (e.g. 406f72).');
+    }
+    if (!Number.isFinite(interval) || interval < 5 || interval > 120) {
+      throw Error('OpenSky poll interval must be 5–120 seconds.');
+    }
+    return { icao24, interval };
+  }
+  async function startOpenskyFeed({ point = false, clearTrail = true } = {}) {
+    const { icao24, interval } = openskyParams();
+    if (point) await ensureSiteForStart();
+    else await ensureSiteConfig();
+    stopTrack(false);
+    if (clearTrail) clearPath();
+    trackMode = 'sim';
+    openskyPointing = !!point;
+    document.querySelectorAll('[data-track-mode]').forEach(b => b.setAttribute('aria-pressed', 'false'));
+    refreshStartLabel();
+    lastLoggedSimKey = '';
+    const mode = point ? 'pointing' : 'observe';
+    appendOpenskyLog(`${mode} ${icao24} · every ${interval}s · site ${config.lat.toFixed(5)}, ${config.lon.toFixed(5)}`);
+    setStatus(point
+      ? `OpenSky tracking ${icao24}…`
+      : `OpenSky polling ${icao24} every ${interval}s (observe)…`);
+    try {
+      localStorage.setItem('track-icao', icao24);
+      localStorage.setItem('track-opensky-interval', String(interval));
+    } catch { /* ignore */ }
+    const body = await trackApi('track-sim', {
+      action: 'start',
+      icao24,
+      interval,
+      idle_stop: 600,
+      point: !!point,
+      lat: config.lat,
+      lon: config.lon,
+      alt: config.alt || 0,
+      mag_declination: config.magDeclination || 0,
+    });
+    syncOpenskyPollUi(true);
+    openskyPointing = !!point;
+    refreshStartLabel();
+    setStatus(body.message || (point ? `Tracking ${icao24}` : `Polling ${icao24}`));
+    if (body.message) appendOpenskyLog(body.message);
+    if (Number.isFinite(body.lat) && Number.isFinite(body.lon)) {
+      lastAim = {
+        azTrue: body.az, el: body.el, range: body.range_m, lat: body.lat, lon: body.lon,
+        altM: body.alt, pan: body.pan,
+      };
+      noteTargetFix();
+      drawTarget(body.lat, body.lon, true);
+      draw();
+    }
+  }
+  async function startOpenskyPoll() {
+    await startOpenskyFeed({ point: false, clearTrail: !openskyPointing });
+  }
+  function stopOpenskyPoll({ sendOff = true, note = 'OpenSky poll stopped' } = {}) {
+    const wasSim = trackMode === 'sim';
+    if (wasSim) stopTrack(sendOff);
+    trackMode = 'off';
+    openskyPointing = false;
+    lastSimIndex = -1;
+    document.querySelectorAll('[data-track-mode]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.trackMode === 'off')));
+    refreshStartLabel();
+    syncOpenskyPollUi(false);
+    refreshDropoutWarn();
+    if (note) {
+      setStatus(note);
+      appendOpenskyLog(note);
+    }
+  }
   async function startSimFlight() {
-    if (!config) { setStatus('Save a device location before Replay flight.'); return; }
+    if (trackSource === 'serial') {
+      setStatus('Serial GPS feed is not wired yet. Switch to OpenSky or Playback.');
+      return;
+    }
+    if (trackSource === 'opensky') {
+      if (!servosArmed()) {
+        setStatus('Enable servos first, then Start tracking to point at the OpenSky target.');
+        return;
+      }
+      try {
+        await startOpenskyFeed({ point: true, clearTrail: true });
+        appendOpenskyLog('pointing on — TRACK TARGET enabled');
+      } catch (error) {
+        openskyPointing = false;
+        refreshStartLabel();
+        if (!el('track-opensky-poll')?.checked) {
+          trackMode = 'off';
+        }
+        setStatus(error.message);
+        appendOpenskyLog(`error: ${error.message}`);
+      }
+      return;
+    }
     const file = el('track-flight')?.value;
-    if (!file) { setStatus('Pick a flight to replay.'); return; }
+    if (!file) {
+      setStatus('Pick a flight CSV under Playback.');
+      return;
+    }
+    if (!servosArmed()) {
+      setStatus('Enable servos first (ops bar or Advanced), then Start tracking.');
+      return;
+    }
+    setStatus('Preparing track…');
+    try {
+      await ensureSiteForStart();
+    } catch (error) {
+      setStatus(error.message);
+      return;
+    }
     stopTrack(false);
     clearPath();
     trackMode = 'sim';
-    panel.querySelectorAll('[data-track-mode]').forEach(b => b.setAttribute('aria-pressed', 'false'));
-    setStatus('Starting flight replay…');
+    openskyPointing = false;
+    document.querySelectorAll('[data-track-mode]').forEach(b => b.setAttribute('aria-pressed', 'false'));
+    refreshStartLabel();
+    syncOpenskyPollUi(false);
+    setStatus('Starting playback…');
     try {
+      localStorage.setItem('track-flight', file);
       const body = await trackApi('track-sim', {
         action: 'start',
         file,
         lat: config.lat,
         lon: config.lon,
         alt: config.alt || 0,
-        pan_align: config.panAlign,
         mag_declination: config.magDeclination || 0,
-        pan_invert: !!config.panInvert,
       });
-      localStorage.setItem('track-flight', file);
-      setStatus(body.message || 'Flight replay running');
+      setStatus(body.message || 'Tracking');
       if (Number.isFinite(body.lat) && Number.isFinite(body.lon)) {
         lastAim = { azTrue: body.az, el: body.el, range: body.range_m, lat: body.lat, lon: body.lon, altM: body.alt, pan: body.pan };
+        noteTargetFix();
         drawTarget(body.lat, body.lon, true);
         draw();
       }
     } catch (error) {
       trackMode = 'off';
-      panel.querySelectorAll('[data-track-mode]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.trackMode === 'off')));
+      document.querySelectorAll('[data-track-mode]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.trackMode === 'off')));
+      refreshStartLabel();
       setStatus(error.message);
+    }
+  }
+  function setWorkspaceView(view) {
+    const showTrack = view === 'track' || view === 'map';
+    const showAdvanced = view === 'advanced' || view === 'controls';
+    const showTune = view === 'tune';
+    const showSensors = view === 'sensors';
+    const active = showTrack ? 'track' : showSensors ? 'sensors' : showAdvanced ? 'advanced' : showTune ? 'tune' : view;
+    document.body.classList.toggle('track-view', showTrack);
+    document.body.classList.toggle('map-view', showTrack); // app.js light-poll path
+    document.body.classList.toggle('advanced-view', showAdvanced);
+    document.body.classList.toggle('tune-view', showTune);
+    document.body.classList.toggle('sensors-view', showSensors);
+    panel.hidden = !showTrack;
+    advanced.hidden = !showAdvanced;
+    tabs.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === active)));
+    if (typeof panTune !== 'undefined') panTune.setVisible(showTune);
+    if (showTrack) {
+      requestAnimationFrame(() => {
+        init();
+        requestAnimationFrame(() => map?.invalidateSize(false));
+      });
+    }
+  }
+  function refreshArmChip() {
+    const chip = el('track-arm');
+    if (!chip) return;
+    const armed = servosArmed();
+    chip.textContent = armed ? 'STOP' : 'Enable servos';
+    chip.classList.toggle('track-chip-live', false);
+    chip.classList.toggle('track-arm-needs-enable', !armed);
+    chip.classList.toggle('track-arm-stop', armed);
+    chip.classList.toggle('secondary', !armed);
+    chip.classList.toggle('estop', armed);
+    if (armed) {
+      chip.disabled = !!document.getElementById('servo-disable')?.disabled;
+      chip.title = 'Disable servos';
+    } else {
+      chip.disabled = !!document.getElementById('servo-enable')?.disabled;
+      chip.title = 'Enable servos';
     }
   }
   let lastSimStatus = '';
   let lastSimDrawAt = 0;
+  let lastLoggedSimKey = '';
+  function appendOpenskyLog(line) {
+    const log = el('track-opensky-log');
+    if (!log) return;
+    const ts = new Date().toLocaleTimeString();
+    const next = `${ts}  ${line}`;
+    const prev = log.dataset.empty === '1' || /^Waiting for OpenSky/.test(log.textContent || '')
+      ? []
+      : (log.textContent || '').split('\n').filter(Boolean);
+    prev.unshift(next);
+    log.dataset.empty = '0';
+    log.textContent = prev.slice(0, 100).join('\n');
+  }
+  function logOpenskySim(sim, { freshSample = false } = {}) {
+    const file = String(sim?.file || '');
+    if (!file.startsWith('opensky:') && trackSource !== 'opensky') return;
+    let line = '';
+    if (Number.isFinite(sim.lat) && Number.isFinite(sim.lon) && freshSample) {
+      const who = sim.callsign || sim.icao24 || file.replace(/^opensky:/, '') || 'ac';
+      const alt = Number.isFinite(sim.alt) ? `${sim.alt.toFixed(0)} m` : 'alt —';
+      const az = Number.isFinite(sim.az) ? `az ${sim.az.toFixed(0)}°` : '';
+      const elev = Number.isFinite(sim.el) ? `el ${sim.el.toFixed(0)}°` : '';
+      const rng = Number.isFinite(sim.range_m) ? `${sim.range_m.toFixed(0)} m` : '';
+      line = `${who}  ${sim.lat.toFixed(5)}, ${sim.lon.toFixed(5)}  ${alt}`
+        + (az || elev ? `  ${[az, elev].filter(Boolean).join(' ')}` : '')
+        + (rng ? `  range ${rng}` : '');
+    } else if (sim.message && sim.message !== lastSimStatus) {
+      line = sim.message;
+    }
+    if (!line) return;
+    const key = `${sim.index ?? ''}|${line}`;
+    if (key === lastLoggedSimKey) return;
+    lastLoggedSimKey = key;
+    appendOpenskyLog(line);
+  }
+  function showOpenskyLog() {
+    setTrackSource('opensky');
+    const log = el('track-opensky-log');
+    log?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    log?.classList.add('track-feed-log-flash');
+    setTimeout(() => log?.classList.remove('track-feed-log-flash'), 900);
+  }
   function applyRelaySim(sim) {
     if (!sim || panel.hidden) return;
     if (sim.active) {
       if (trackMode !== 'sim') {
         trackMode = 'sim';
-        panel.querySelectorAll('[data-track-mode]').forEach(b => b.setAttribute('aria-pressed', 'false'));
+        document.querySelectorAll('[data-track-mode]').forEach(b => b.setAttribute('aria-pressed', 'false'));
+        refreshStartLabel();
       }
+      if (String(sim.file || '').startsWith('opensky:')) {
+        syncOpenskyPollUi(true);
+        if (typeof sim.pointing === 'boolean' && sim.pointing !== openskyPointing) {
+          openskyPointing = sim.pointing;
+          refreshStartLabel();
+        }
+      }
+      const idx = Number.isFinite(sim.index) ? sim.index : -1;
+      const freshSample = idx >= 0 && idx !== lastSimIndex;
+      if (freshSample) lastSimIndex = idx;
       if (Number.isFinite(sim.lat) && Number.isFinite(sim.lon)) {
         lastAim = {
           azTrue: sim.az, el: sim.el, range: sim.range_m, lat: sim.lat, lon: sim.lon,
           altM: sim.alt, pan: sim.pan, dish: dishAzimuth(), azErr: null,
         };
+        if (freshSample) noteTargetFix();
         // Keep marker/path ≤ ~4 Hz — poll is faster and trail setLatLngs was a freeze vector.
         const now = performance.now();
         if (now - lastSimDrawAt >= 250) {
           lastSimDrawAt = now;
-          drawTarget(sim.lat, sim.lon, true);
+          const tip = sim.callsign || sim.icao24 || null;
+          drawTarget(sim.lat, sim.lon, true, tip);
           draw();
+        } else {
+          refreshDropoutWarn();
         }
+      } else {
+        refreshDropoutWarn();
       }
+      logOpenskySim(sim, { freshSample });
       if (sim.message && sim.message !== lastSimStatus) {
         lastSimStatus = sim.message;
         setStatus(sim.message);
       }
     } else if (trackMode === 'sim') {
+      const wasOpensky = String(sim.file || '').startsWith('opensky:') || el('track-opensky-poll')?.checked;
       trackMode = 'off';
-      panel.querySelectorAll('[data-track-mode]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.trackMode === 'off')));
+      openskyPointing = false;
+      lastSimIndex = -1;
+      document.querySelectorAll('[data-track-mode]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.trackMode === 'off')));
+      refreshStartLabel();
+      if (wasOpensky) syncOpenskyPollUi(false);
       lastSimStatus = sim.message || 'Sim stopped';
       setStatus(lastSimStatus);
+      logOpenskySim(sim);
+      refreshDropoutWarn();
     }
   }
   function startGotoCorrector(lat, lon, altM) {
@@ -439,12 +892,18 @@ const deviceMap = (() => {
   }
   function applyAlign(lat, lon) {
     if (!config) throw Error('Save a device location first.');
-    if (!Number.isFinite(heading) || magStale) throw Error('Need a fresh mag heading before Align.');
+    // Prefer FW Mag heading (what TRACK uses) over browser IMU estimate.
+    const alignHdg = panFb === 'MAG' && Number.isFinite(panAngle) && !stale
+      ? panAngle
+      : heading;
+    if (!Number.isFinite(alignHdg) || (panFb !== 'MAG' && magStale)) {
+      throw Error('Need a fresh mag heading before Align.');
+    }
     const azTrue = bearingDeg(config.lat, config.lon, lat, lon);
-    const magDeclination = wrap180(azTrue - heading);
-    const panAlign = Number.isFinite(panAngle) ? panAlignForMapAz(azTrue) : config.panAlign;
-    saveConfig({ ...config, magDeclination, panAlign },
-      `Aligned (landmark→mag): heading ${heading.toFixed(1)}° → map az ${azTrue.toFixed(1)}° · decl ${magDeclination.toFixed(1)}° · pot-align ${panAlign.toFixed(1)}° (diagnostic).`);
+    // Landmark Align only sets mag declination (true − heading). No pot panAlign.
+    const magDeclination = wrap180(azTrue - alignHdg);
+    saveConfig({ ...config, magDeclination, panAlign: 0, panInvert: false },
+      `Aligned (landmark→mag): heading ${alignHdg.toFixed(1)}° → map az ${azTrue.toFixed(1)}° · decl ${magDeclination.toFixed(1)}°.`);
     alignReady = true;
     lastAim = { pan: panAngle, el: elevation, azTrue, range: haversineM(config.lat, config.lon, lat, lon), dish: azTrue, azErr: 0, lat, lon, altM: num('track-altitude', 500) };
     drawTarget(lat, lon, false);
@@ -453,13 +912,17 @@ const deviceMap = (() => {
   }
   function seedAlignFromMag() {
     if (!config) throw Error('Save a device location first.');
-    if (!Number.isFinite(heading) || magStale) throw Error('Need a fresh mag heading (hold still).');
-    const magAz = (heading + 360) % 360;
-    const panAlign = Number.isFinite(panAngle) ? panAlignForMapAz(magAz) : config.panAlign;
-    saveConfig({ ...config, magDeclination: 0, panAlign },
-      `Seeded: declination 0 · map az = mag ${magAz.toFixed(1)}° · pot-align ${Number.isFinite(panAlign) ? panAlign.toFixed(1) : '—'}° (diagnostic). Landmark Align if mag≠true north.`);
+    const seedHdg = panFb === 'MAG' && Number.isFinite(panAngle) && !stale
+      ? panAngle
+      : heading;
+    if (!Number.isFinite(seedHdg) || (panFb !== 'MAG' && magStale)) {
+      throw Error('Need a fresh mag heading (hold still).');
+    }
+    const magAz = wrap360(seedHdg);
+    saveConfig({ ...config, magDeclination: 0, panAlign: 0, panInvert: false },
+      `Seeded decl=0 · map az = mag ${magAz.toFixed(1)}°. Landmark Align if mag≠true north.`);
     alignReady = true;
-    setStatus(`Mag seed · decl=0 · go-to will chase mag ${magAz.toFixed(1)}°.`);
+    setStatus(`Mag seed · decl=0 · track/go-to chase mag heading ${magAz.toFixed(1)}°.`);
     draw();
   }
   function drawTarget(lat, lon, trail = false, label = null) {
@@ -587,30 +1050,46 @@ const deviceMap = (() => {
       });
     }
   }
+  function predictPlotEnabled() {
+    return !!el('track-predict')?.checked;
+  }
+  function syncPredictPlotChrome() {
+    const on = predictPlotEnabled();
+    const azSub = el('map-az-chart-sub');
+    const elSub = el('map-el-chart-sub');
+    const azLeg = el('map-az-cmd-legend');
+    const elLeg = el('map-el-cmd-legend');
+    if (azSub) azSub.textContent = on ? 'FW dish · GPS · predict' : 'FW dish · GPS';
+    if (elSub) elSub.textContent = on ? 'dish · GPS · predict' : 'dish · GPS';
+    if (azLeg) azLeg.hidden = !on;
+    if (elLeg) elLeg.hidden = !on;
+  }
   function paintTrackPlots() {
     if (panel.hidden) return;
+    syncPredictPlotChrome();
+    const showPredict = predictPlotEnabled();
     const range = [], alt = [], azA = [], azT = [], azP = [], elA = [], elT = [], elP = [];
     for (const s of trackHist) {
       if (Number.isFinite(s.range)) range.push({ t: s.t, v: s.range });
       if (Number.isFinite(s.alt)) alt.push({ t: s.t, v: s.alt });
       if (Number.isFinite(s.azActual)) azA.push({ t: s.t, v: s.azActual });
       if (Number.isFinite(s.azTarget)) azT.push({ t: s.t, v: s.azTarget });
-      if (Number.isFinite(s.azPredict)) azP.push({ t: s.t, v: s.azPredict });
+      if (showPredict && Number.isFinite(s.azPredict)) azP.push({ t: s.t, v: s.azPredict });
       if (Number.isFinite(s.elActual)) elA.push({ t: s.t, v: s.elActual });
       if (Number.isFinite(s.elTarget)) elT.push({ t: s.t, v: s.elTarget });
-      if (Number.isFinite(s.elPredict)) elP.push({ t: s.t, v: s.elPredict });
+      if (showPredict && Number.isFinite(s.elPredict)) elP.push({ t: s.t, v: s.elPredict });
     }
     paintTrackChart('map-distance-chart', [range, alt], {
       colors: ['#69adff', '#f5bd4f'], labels: ['Range m', 'Alt m'], decimals: 0,
     });
-    paintTrackChart('map-az-chart', [azA, azT, azP], {
-      colors: ['#ef3038', '#f5bd4f', '#61e2bd'],
-      labels: ['Az dish', 'Az GPS', 'Az predict'],
+    paintTrackChart('map-az-chart', showPredict ? [azA, azT, azP] : [azA, azT], {
+      colors: showPredict ? ['#ef3038', '#f5bd4f', '#61e2bd'] : ['#ef3038', '#f5bd4f'],
+      labels: showPredict ? ['Az FW', 'Az GPS', 'Az predict'] : ['Az FW', 'Az GPS'],
       decimals: 1, wrapBreak: 180,
     });
-    paintTrackChart('map-el-chart', [elA, elT, elP], {
-      colors: ['#69adff', '#a88bfa', '#61e2bd'],
-      labels: ['El dish', 'El GPS', 'El predict'],
+    paintTrackChart('map-el-chart', showPredict ? [elA, elT, elP] : [elA, elT], {
+      colors: showPredict ? ['#69adff', '#a88bfa', '#61e2bd'] : ['#69adff', '#a88bfa'],
+      labels: showPredict ? ['El dish', 'El GPS', 'El predict'] : ['El dish', 'El GPS'],
       decimals: 1,
     });
   }
@@ -751,54 +1230,106 @@ const deviceMap = (() => {
     el('map-elevation-pointer').setAttribute('visibility', elevationValid ? 'visible' : 'hidden');
     if (elevationValid) el('map-elevation-pointer').setAttribute('transform', `rotate(${-elevation} 90 82)`);
     const dish = dishAzimuth();
-    // In FW Mag mode motion.angle is mag heading, not pot — don't invent a pot-diag ray from it.
+    const cmdMap = trueAzFromPanCmd(Number.isFinite(panTarget) ? panTarget : lastAim?.pan);
+    const browserMag = browserMagMapAzimuth();
     const usingMagFb = panFb === 'MAG';
-    const potDish = usingMagFb ? null : potDishAzimuth();
+    const usingPotFb = panFb === 'POT';
+    const fbLabel = fwFeedbackLabel();
     const panCmd = Number.isFinite(panTarget) ? panTarget : lastAim?.pan;
     const panErr = Number.isFinite(panAngle) && Number.isFinite(panCmd) ? wrap180(panCmd - panAngle) : null;
     const tiltCmd = Number.isFinite(target) ? target : lastAim?.el;
     const tiltErr = Number.isFinite(elevation) && Number.isFinite(tiltCmd) ? tiltCmd - elevation : null;
     const trackAzErr = lastAim && Number.isFinite(dish) ? wrap180(lastAim.azTrue - dish) : null;
     const trackElErr = lastAim && Number.isFinite(elevation) ? lastAim.el - elevation : null;
-    const fbLabel = usingMagFb ? 'MAG' : 'POT';
     el('map-pointing-pan').textContent = Number.isFinite(panAngle)
-      ? `${fbLabel} ${panAngle.toFixed(1)}°${usingMagFb ? ' (FW feedback)' : ' (actuator)'}${Number.isFinite(panCmd) ? ` → ${panCmd.toFixed(1)}° · servo ${fmtErr(panErr)}` : ''}${stale ? ' · STALE' : ''}`
-      : `${fbLabel} unavailable`;
+      ? `FW ${fbLabel} ${panAngle.toFixed(1)}°${Number.isFinite(panCmd) ? ` → cmd ${panCmd.toFixed(1)}° · err ${fmtErr(panErr)}` : ''}${stale ? ' · STALE' : ''}`
+      : `FW ${fbLabel} measure unavailable`;
     el('map-pointing-tilt').textContent = Number.isFinite(elevation)
       ? `TILT ${elevation.toFixed(1)}°${Number.isFinite(tiltCmd) ? ` → ${tiltCmd.toFixed(1)}° · err ${fmtErr(tiltErr)}` : ''}`
       : 'TILT unavailable';
     el('map-pointing-track').textContent = lastAim && Number.isFinite(trackAzErr)
-      ? `Track (mag→gold) az ${fmtErr(trackAzErr)} · el ${fmtErr(trackElErr)} · tgt ${lastAim.azTrue.toFixed(1)}°`
-      : 'Track — no target yet';
+      ? `Track (FW→gold) az ${fmtErr(trackAzErr)} · el ${fmtErr(trackElErr)} · tgt ${lastAim.azTrue.toFixed(1)}°`
+      : lastAim
+        ? `Track tgt ${lastAim.azTrue.toFixed(1)}° · FW map az unknown (${fbLabel})`
+        : 'Track — no target yet';
     el('map-pointing-offset').textContent = config
-      ? `Decl ${config.magDeclination.toFixed(1)}° · map-mag ${Number.isFinite(dish) ? dish.toFixed(1) + '°' : '—'}${Number.isFinite(potDish) ? ` · pot-diag ${potDish.toFixed(1)}°` : (usingMagFb ? ' · pot-diag off (FW Mag)' : '')}${config.panInvert ? ' · INVERT' : ''}`
+      ? `Decl ${config.magDeclination.toFixed(1)}° · FW map ${Number.isFinite(dish) ? dish.toFixed(1) + '°' : '—'} · cmd map ${Number.isFinite(cmdMap) ? cmdMap.toFixed(1) + '°' : '—'}${Number.isFinite(browserMag) ? ` · browser mag ${browserMag.toFixed(1)}°` : ''}`
       : 'Save location first';
     const miss = Number.isFinite(trackAzErr) && Math.abs(trackAzErr) > 3;
-    el('map-pointing-hint').textContent = gotoTimer
-      ? 'Correcting on mag — waiting for red to meet gold.'
-      : miss
-        ? 'Mag≠gold — Go to click (or Align declination on a landmark).'
-        : usingMagFb
-          ? 'Success = mag (red) on gold. FW Mag PID closes on heading.'
-          : 'Success = mag on gold. Pot degrees are not world truth.';
-    el('map-pointing-title').textContent = magStale ? 'Pointing · MAG STALE' : (gotoTimer ? 'Pointing · CORRECTING' : (miss ? 'Pointing · MISS' : (usingMagFb ? 'Pointing · FW Mag' : 'Pointing')));
-    el('device-aim-source').textContent = Number.isFinite(dish)
-      ? (usingMagFb
-        ? `AIM: FW Mag ${Number.isFinite(panAngle) ? panAngle.toFixed(1) + '°' : '—'} → ${Number.isFinite(panCmd) ? panCmd.toFixed(1) + '°' : '—'} · map az ${dish.toFixed(1)}° (decl ${config?.magDeclination ?? 0}°).`
-        : `AIM: mag ${dish.toFixed(1)}° (decl ${config?.magDeclination ?? 0}°). Pot ${Number.isFinite(panAngle) ? panAngle.toFixed(1) + '°' : '—'} = FW Pot feedback.${config?.panInvert ? ' INVERT.' : ''}`)
-      : 'AIM: waiting for mag heading.';
+    el('map-pointing-hint').textContent = usingPotFb
+      ? 'Board is on Pot feedback — red ray is not mag closed-loop. Enable Mag (track home does this) or Tune → Mag position.'
+      : gotoTimer
+        ? 'Correcting — waiting for red (FW measure) to meet gold.'
+        : miss
+          ? 'FW≠gold — Go to click (or Align declination on a landmark).'
+          : usingMagFb
+            ? 'Red = FW Mag measure. Gold = target. Dashed white = FW command.'
+            : 'Waiting for board pan_fb (MAG/POT).';
+    el('map-pointing-title').textContent = stale
+      ? 'Pointing · LINK STALE'
+      : gotoTimer
+        ? `Pointing · CORRECTING · FW ${fbLabel}`
+        : miss
+          ? `Pointing · MISS · FW ${fbLabel}`
+          : `Pointing · FW ${fbLabel}`;
+    if (usingMagFb && Number.isFinite(panAngle)) {
+      el('device-aim-source').textContent =
+        `FW feedback: MAG · measure ${panAngle.toFixed(1)}° → cmd ${Number.isFinite(panCmd) ? panCmd.toFixed(1) + '°' : '—'} · map ${Number.isFinite(dish) ? dish.toFixed(1) + '°' : '—'} (decl ${config?.magDeclination ?? 0}°)`;
+    } else if (usingPotFb && Number.isFinite(panAngle)) {
+      el('device-aim-source').textContent =
+        `FW feedback: POT · pot ${panAngle.toFixed(1)}° → cmd ${Number.isFinite(panCmd) ? panCmd.toFixed(1) + '°' : '—'} · NOT mag closed-loop${Number.isFinite(browserMag) ? ` · browser mag map ${browserMag.toFixed(1)}° (display only)` : ''}`;
+    } else {
+      el('device-aim-source').textContent = `FW feedback: ${fbLabel} · waiting for measure`;
+    }
     el('device-map-heading').textContent = Number.isFinite(dish)
-      ? `Mag(red) ${dish.toFixed(1)}° · heading ${heading.toFixed(1)}° + decl ${config.magDeclination.toFixed(1)}°${magStale ? ' · STALE' : ''}`
-      : `Mag ray waiting${magStale ? ' · STALE' : ''}`;
+      ? `Red(FW) ${dish.toFixed(1)}°${Number.isFinite(cmdMap) ? ` · cmd ${cmdMap.toFixed(1)}°` : ''}${Number.isFinite(browserMag) ? ` · browser ${browserMag.toFixed(1)}°` : ''}${stale ? ' · STALE' : ''}`
+      : usingPotFb
+        ? `No FW world az (Pot, no align)${Number.isFinite(browserMag) ? ` · browser mag ${browserMag.toFixed(1)}°` : ''}`
+        : `FW dish ray waiting${stale ? ' · STALE' : ''}`;
+  }
+  function refreshDropoutWarn() {
+    const lamp = el('track-dropout-warn');
+    if (!lamp) return;
+    const tracking = trackMode === 'sim' || trackMode === 'goto' || trackMode === 'circle' || trackMode === 'rocket';
+    const ageS = lastTargetAt ? (performance.now() - lastTargetAt) / 1000 : Infinity;
+    const drop = tracking && lastTargetAt > 0 && ageS > TRACK_DROPOUT_WARN_S;
+    lamp.classList.toggle('track-dropout-on', drop);
+    lamp.textContent = drop ? `NO DATA ${ageS.toFixed(0)}s` : 'DATA';
+    lamp.title = drop
+      ? `No parsable track data for ${ageS.toFixed(1)}s (warn after ${TRACK_DROPOUT_WARN_S}s)`
+      : `Lights when no parsable track data for over ${TRACK_DROPOUT_WARN_S}s`;
+  }
+  function noteTargetFix() {
+    lastTargetAt = performance.now();
+    refreshDropoutWarn();
+  }
+  function rayLengthM() {
+    // Prefer horizontal range to the live target so the red ray meets the gold line tip.
+    const range = lastAim?.range;
+    if (Number.isFinite(range) && range >= 1) return Math.min(range, 100000);
+    return config?.length || 1000;
   }
   function drawLeaflet() {
     if (!map || !config || panel.hidden) return;
     const dish = dishAzimuth();
-    const potDish = panFb === 'MAG' ? null : potDishAzimuth();
+    const cmdMap = trueAzFromPanCmd(Number.isFinite(panTarget) ? panTarget : lastAim?.pan);
+    const len = rayLengthM();
     marker.setLatLng([config.lat, config.lon]);
-    setRay(dishRay, !magStale ? dish : null, config.length);
-    setRay(magRay, !stale ? potDish : null, config.length * 0.85);
-    setRay(targetRay, lastAim && !magStale ? lastAim.azTrue : null, Math.min(config.length, Math.max(50, lastAim?.range || config.length)));
+    // Red = FW measure (active feedback → map). White dashed = FW command.
+    // Never draw browser mag as the dish ray — that lied when FW was on Pot.
+    setRay(dishRay, !stale ? dish : null, len);
+    setRay(magRay, !stale ? cmdMap : null, len * 0.85);
+    // Gold dashed: tracker site → rocket (last GPS/sim fix), not an azimuth ray.
+    if (targetRay) {
+      if (lastAim && Number.isFinite(lastAim.lat) && Number.isFinite(lastAim.lon)) {
+        targetRay.setLatLngs([[config.lat, config.lon], [lastAim.lat, lastAim.lon]]);
+        if (!map.hasLayer(targetRay)) targetRay.addTo(map);
+      } else {
+        targetRay.setLatLngs([]);
+        if (map.hasLayer(targetRay)) map.removeLayer(targetRay);
+      }
+    }
+    refreshDropoutWarn();
   }
   function draw(force = false) {
     const now = performance.now();
@@ -842,36 +1373,23 @@ const deviceMap = (() => {
   }
   tabs.addEventListener('click', event => {
     const button = event.target.closest('[data-view]'); if (!button) return;
-    const view = button.dataset.view;
-    const showMap = view === 'map';
-    document.body.classList.toggle('map-view', showMap);
-    document.body.classList.toggle('tune-view', view === 'tune');
-    panel.hidden = !showMap;
-    tabs.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b === button)));
-    if (typeof panTune !== 'undefined') panTune.setVisible(view === 'tune');
-    if (showMap) {
-      // Let the map-view CSS settle before Leaflet measures the container.
-      requestAnimationFrame(() => {
-        init();
-        requestAnimationFrame(() => map?.invalidateSize(false));
-      });
-    }
+    setWorkspaceView(button.dataset.view);
   });
   function read() {
     const c = {
       lat: el('device-latitude').valueAsNumber,
       lon: el('device-longitude').valueAsNumber,
       alt: el('device-altitude').valueAsNumber,
-      panAlign: el('device-pan-align').valueAsNumber,
+      panAlign: 0, // pot-era; Mag TRACK ignores align
       magDeclination: el('device-mag-declination').valueAsNumber,
       length: el('device-ray-length').valueAsNumber,
-      panInvert: el('device-pan-invert').checked,
+      panInvert: false,
     };
-    const nums = { lat: c.lat, lon: c.lon, alt: c.alt, panAlign: c.panAlign, magDeclination: c.magDeclination, length: c.length };
+    const nums = { lat: c.lat, lon: c.lon, alt: c.alt, magDeclination: c.magDeclination, length: c.length };
     if (!Object.values(nums).every(Number.isFinite) || Math.abs(c.lat) > 90 || Math.abs(c.lon) > 180 ||
         c.alt < 0 || c.alt > 10000 ||
-        Math.abs(c.panAlign) > 360 || Math.abs(c.magDeclination) > 360 || c.length < 1 || c.length > 100000) {
-      throw Error('Enter valid coordinates, altitude, align, mag declination and line length.');
+        Math.abs(c.magDeclination) > 360 || c.length < 1 || c.length > 100000) {
+      throw Error('Enter valid coordinates, altitude, mag declination and line length.');
     }
     return c;
   }
@@ -889,7 +1407,7 @@ const deviceMap = (() => {
     el('device-ray-length').value = config.length;
     el('device-pan-invert').checked = !!config.panInvert;
     el('device-location-status').textContent = note ||
-      `Device location: ${config.lat.toFixed(6)}, ${config.lon.toFixed(6)} · alt ${config.alt.toFixed(1)} m AGL · PAN→north ${config.panAlign}° · decl ${config.magDeclination}°${config.panInvert ? ' · INVERT' : ''} · saved`;
+      `Device location: ${config.lat.toFixed(6)}, ${config.lon.toFixed(6)} · alt ${config.alt.toFixed(1)} m AGL · decl ${config.magDeclination}° · Mag track · saved`;
     init(); if (map) { marker.addTo(map); map.setView([config.lat, config.lon], map.getZoom() || 15); } draw();
     homePushedKey = null;
     pushTrackHome(config, true).then(() => {
@@ -910,8 +1428,8 @@ const deviceMap = (() => {
     } catch (error) { el('device-location-status').textContent = error.message; }
   });
   el('device-site').addEventListener('change', () => {
+    syncSiteSelects('device-site');
     const id = el('device-site').value;
-    localStorage.setItem('device-site', id || '');
     if (!id) {
       el('device-location-status').textContent = 'Custom coordinates — edit fields below, then Save.';
       return;
@@ -919,29 +1437,186 @@ const deviceMap = (() => {
     const site = siteCatalog.find(s => s.id === id);
     if (site) applySite(site, { save: false });
   });
+  el('track-site-ops').addEventListener('change', () => {
+    syncSiteSelects('track-site-ops');
+    const id = el('track-site-ops').value;
+    if (!id) return;
+    const site = siteCatalog.find(s => s.id === id);
+    if (site) applySite(site, { save: false });
+  });
+  el('track-save-site').addEventListener('click', () => {
+    saveNamedSite().catch(error => setStatus(error.message));
+  });
+  el('device-save-named-site').addEventListener('click', () => {
+    saveNamedSite().catch(error => {
+      el('device-location-status').textContent = error.message;
+    });
+  });
+  el('track-arm').addEventListener('click', () => {
+    if (servosArmed()) {
+      const stop = document.getElementById('servo-disable');
+      if (stop && !stop.disabled) stop.click();
+      else setStatus('Cannot disable servos right now.');
+      return;
+    }
+    const enable = document.getElementById('servo-enable');
+    if (enable && !enable.disabled) enable.click();
+    else setStatus('Connect and wait for servo state, then Enable.');
+  });
   el('map-seed-mag').addEventListener('click', () => {
     try { seedAlignFromMag(); }
     catch (error) { el('device-location-status').textContent = error.message; }
   });
   el('map-center').addEventListener('click', () => { if (config) { init(); map?.setView([config.lat, config.lon], map.getZoom()); } });
-  panel.querySelectorAll('[data-track-mode]').forEach(button => button.addEventListener('click', () => setMode(button.dataset.trackMode)));
+  advanced.querySelectorAll('[data-track-mode]').forEach(button => button.addEventListener('click', () => setMode(button.dataset.trackMode)));
   el('track-run-sim').addEventListener('click', () => { startSimFlight().catch(error => setStatus(error.message)); });
   try {
     const savedLead = parseFloat(localStorage.getItem('track-lead'));
     if (Number.isFinite(savedLead)) el('track-lead').value = savedLead;
     el('track-predict').checked = localStorage.getItem('track-predict') !== '0';
+    el('track-search').checked = localStorage.getItem('track-search') !== '0';
+    const savedSearchSpeed = parseFloat(localStorage.getItem('track-search-speed'));
+    if (Number.isFinite(savedSearchSpeed)) el('track-search-speed').value = savedSearchSpeed;
+    const savedSearchGap = parseFloat(localStorage.getItem('track-search-gap'));
+    if (Number.isFinite(savedSearchGap)) el('track-search-gap').value = savedSearchGap;
+    syncPredictPlotChrome();
   } catch { /* ignore */ }
   el('track-predict').addEventListener('change', () => {
+    syncPredictPlotChrome();
+    paintTrackPlots();
     pushTrackPredict().then(() => setStatus(`Predict ${el('track-predict').checked ? 'on' : 'off'}`)).catch(error => setStatus(error.message));
   });
   el('track-lead').addEventListener('change', () => {
     pushTrackPredict().then(() => setStatus(`Lead ${el('track-lead').valueAsNumber.toFixed(2)} s`)).catch(error => setStatus(error.message));
   });
+  el('track-search').addEventListener('change', () => {
+    pushTrackPredict().then(() => setStatus(`Spiral search ${el('track-search').checked ? 'on' : 'off'}`)).catch(error => setStatus(error.message));
+  });
+  el('track-search-gap').addEventListener('change', () => {
+    pushTrackPredict().then(() => setStatus(`Search gap ${el('track-search-gap').valueAsNumber.toFixed(1)} s`)).catch(error => setStatus(error.message));
+  });
+  el('track-search-speed').addEventListener('change', () => {
+    pushTrackPredict().then(() => setStatus(`Search speed ${el('track-search-speed').valueAsNumber.toFixed(0)} °/s`)).catch(error => setStatus(error.message));
+  });
   loadFlightList();
+  try {
+    const savedIcao = (localStorage.getItem('track-icao') || '').trim().toLowerCase();
+    if (/^[0-9a-f]{6}$/.test(savedIcao) && el('track-icao')) el('track-icao').value = savedIcao;
+    const savedInterval = parseFloat(localStorage.getItem('track-opensky-interval'));
+    if (el('track-opensky-interval') && Number.isFinite(savedInterval)) {
+      el('track-opensky-interval').value = String(Math.min(120, Math.max(5, savedInterval)));
+    }
+    if (el('track-opensky-poll')) el('track-opensky-poll').checked = false;
+    const savedSource = localStorage.getItem('track-source');
+    setTrackSource(savedSource === 'playback' || savedSource === 'serial' || savedSource === 'opensky'
+      ? savedSource
+      : 'opensky');
+  } catch {
+    setTrackSource('opensky');
+  }
+  document.querySelectorAll('[data-track-source]').forEach(btn => {
+    btn.addEventListener('click', () => setTrackSource(btn.dataset.trackSource));
+  });
+  el('track-icao')?.addEventListener('change', () => {
+    const v = (el('track-icao').value || '').trim().toLowerCase();
+    try {
+      if (/^[0-9a-f]{6}$/.test(v)) localStorage.setItem('track-icao', v);
+      else if (!v) localStorage.removeItem('track-icao');
+    } catch { /* ignore */ }
+    if (el('track-opensky-poll')?.checked) {
+      startOpenskyPoll().catch(error => {
+        stopOpenskyPoll({ note: `error: ${error.message}` });
+        setStatus(error.message);
+      });
+    }
+  });
+  el('track-opensky-poll')?.addEventListener('change', () => {
+    if (openskyPollSyncing) return;
+    const on = !!el('track-opensky-poll').checked;
+    if (on) {
+      startOpenskyPoll().catch(error => {
+        syncOpenskyPollUi(false);
+        setStatus(error.message);
+        appendOpenskyLog(`error: ${error.message}`);
+      });
+    } else {
+      stopOpenskyPoll();
+    }
+  });
+  el('track-opensky-interval')?.addEventListener('change', () => {
+    const v = el('track-opensky-interval').valueAsNumber;
+    try {
+      if (Number.isFinite(v)) localStorage.setItem('track-opensky-interval', String(v));
+    } catch { /* ignore */ }
+    if (el('track-opensky-poll')?.checked) {
+      startOpenskyPoll().catch(error => {
+        stopOpenskyPoll({ note: `error: ${error.message}` });
+        setStatus(error.message);
+      });
+    }
+  });
+  el('track-dropout-warn')?.addEventListener('click', () => showOpenskyLog());
+  el('track-opensky-log-clear')?.addEventListener('click', () => {
+    const log = el('track-opensky-log');
+    if (!log) return;
+    log.dataset.empty = '1';
+    log.textContent = 'Waiting for OpenSky polls…';
+    lastLoggedSimKey = '';
+  });
+  async function refreshOpenskyCredsStatus() {
+    const status = el('opensky-creds-status');
+    const idBox = el('opensky-client-id');
+    if (!status) return;
+    try {
+      const response = await fetch('/api/opensky-credentials', { cache: 'no-store' });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw Error(body.error || response.statusText);
+      if (idBox && body.client_id) idBox.value = body.client_id;
+      status.textContent = body.has_secret
+        ? `Authenticated client “${body.client_id}” · secret saved on disk (gitignored).`
+        : `Client “${body.client_id || '—'}” · paste client secret below and Save.`;
+    } catch (error) {
+      status.textContent = `OpenSky creds: ${error.message}`;
+    }
+  }
+  el('opensky-creds-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const status = el('opensky-creds-status');
+    try {
+      const body = await trackApi('opensky-credentials', {
+        client_id: el('opensky-client-id')?.value || 'your-opensky-client-id',
+        client_secret: el('opensky-client-secret')?.value || '',
+      });
+      if (el('opensky-client-secret')) el('opensky-client-secret').value = '';
+      if (status) {
+        status.textContent = body.has_secret
+          ? `Saved “${body.client_id}” with secret → ${body.path}`
+          : `Saved “${body.client_id}” (no new secret — kept previous or still empty).`;
+      }
+    } catch (error) {
+      if (status) status.textContent = error.message;
+    }
+  });
+  refreshOpenskyCredsStatus();
   el('track-stop').addEventListener('click', () => {
+    const keepPoll = trackSource === 'opensky' && !!el('track-opensky-poll')?.checked;
+    const wasPointing = openskyPointing;
     stopTrack(true);
     setMode('off');
-    setStatus('Stopped — axes OFF queued.');
+    openskyPointing = false;
+    refreshStartLabel();
+    if (keepPoll) {
+      // Drop back to observe-only so Poll stays on without pointing.
+      startOpenskyFeed({ point: false, clearTrail: false }).then(() => {
+        setStatus(wasPointing ? 'Pointing stopped — still polling OpenSky (observe).' : 'OpenSky observe running.');
+      }).catch(error => {
+        syncOpenskyPollUi(false);
+        setStatus(error.message);
+      });
+    } else {
+      syncOpenskyPollUi(false);
+      setStatus('Stopped — axes OFF queued.');
+    }
   });
   try {
     const saved = JSON.parse(localStorage.getItem('tracker-device-location'));
@@ -955,12 +1630,12 @@ const deviceMap = (() => {
       el('device-ray-length').value = saved.length;
       el('device-pan-invert').checked = !!saved.panInvert;
       config = read();
-      alignReady = Number.isFinite(saved.panAlign);
-      el('device-location-status').textContent = alignReady
-        ? `Device location: ${config.lat.toFixed(6)}, ${config.lon.toFixed(6)} · alt ${config.alt.toFixed(1)} m AGL · PAN→north ${config.panAlign}° · decl ${config.magDeclination}°${config.panInvert ? ' · INVERT' : ''} · saved`
-        : `Device location: ${config.lat.toFixed(6)}, ${config.lon.toFixed(6)} · Seed from mag or landmark Align`;
+      alignReady = true; // Mag track needs site + decl only; pot align retired.
+      el('device-location-status').textContent =
+        `Device location: ${config.lat.toFixed(6)}, ${config.lon.toFixed(6)} · alt ${config.alt.toFixed(1)} m AGL · decl ${config.magDeclination}° · Mag track · saved`;
     }
   } catch { config = null; }
+  setWorkspaceView('track');
   return {
     update(value, magIsStale, tiltAngle = null, targetAngle = null, panDeg = null, panCmd = null, linkIsStale = magIsStale, feedback = null) {
       const now = performance.now() / 1000;
@@ -974,11 +1649,13 @@ const deviceMap = (() => {
       elevation = tiltAngle; target = targetAngle;
       panAngle = Number.isFinite(panDeg) ? panDeg : null;
       panTarget = Number.isFinite(panCmd) ? panCmd : null;
-      // While Map is hidden, skip draw entirely — Controls poll was driving Leaflet updates for nothing.
+      refreshArmChip();
+      // While Track is hidden, skip draw entirely — Advanced/Tune poll was driving Leaflet for nothing.
       if (!panel.hidden) draw();
     },
     applyRelaySim,
     seedAlignFromMag,
     destination,
+    setWorkspaceView,
   };
 })();

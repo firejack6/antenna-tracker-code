@@ -95,26 +95,21 @@ bool applyPositionTarget(int i, float target, const char **error) {
   return true;
 }
 
-bool applyTrackLatLonAlt(float lat, float lon, float alt, const char **error) {
+bool applyTrackAzEl(float azTrue, float el, const char **error) {
   if (error) *error = nullptr;
   if (!trackHome.valid) {
     if (error) *error = "Track error: set TRACK HOME first";
     return false;
   }
-  const float range = fmaxf(1.f, trackHaversineM(trackHome.lat, trackHome.lon, lat, lon));
-  const float azTrue = trackBearingDeg(trackHome.lat, trackHome.lon, lat, lon);
-  const float relAlt = alt - trackHome.alt;
-  float el = atanf(relAlt / range) * 57.2957795f;
+  // TRACK aims in magnetic heading: pan target = true az − decl. Pot ALIGN/INVERT
+  // are diagnostic-only and must not steer the dish (Mag feedback required).
+  if (panPositionFeedback != PanPositionFeedback::Mag) {
+    if (error) *error = "Track error: enable Mag PAN feedback";
+    return false;
+  }
   if (el < -5.f) el = -5.f;
   if (el > 85.f) el = 85.f;
-  float pan;
-  if (panPositionFeedback == PanPositionFeedback::Mag) {
-    pan = trackWrap360(azTrue - trackHome.decl);
-  } else if (trackHome.panInvert) {
-    pan = trackWrap360(trackHome.panAlign - azTrue);
-  } else {
-    pan = trackWrap360(azTrue - trackHome.panAlign);
-  }
+  const float pan = trackWrap360(azTrue - trackHome.decl);
   const float tilt = -el;
   tiltPositionRampEnabled = true;
   const char *err = nullptr;
@@ -129,11 +124,47 @@ bool applyTrackLatLonAlt(float lat, float lon, float alt, const char **error) {
   return true;
 }
 
+bool applyTrackLatLonAlt(float lat, float lon, float alt, const char **error) {
+  if (error) *error = nullptr;
+  if (!trackHome.valid) {
+    if (error) *error = "Track error: set TRACK HOME first";
+    return false;
+  }
+  const float range = fmaxf(1.f, trackHaversineM(trackHome.lat, trackHome.lon, lat, lon));
+  const float azTrue = trackBearingDeg(trackHome.lat, trackHome.lon, lat, lon);
+  const float relAlt = alt - trackHome.alt;
+  float el = atanf(relAlt / range) * 57.2957795f;
+  if (!applyTrackAzEl(azTrue, el, error)) return false;
+  // Remember last GPS/predict aim only — not spiral search points.
+  if (!trackSearch.active) trackSearchNoteAim(azTrue, el);
+  return true;
+}
+
 void updateTrackPredictMotion(uint64_t nowUs) {
-  if (!trackHome.valid || !trackPredict.enabled || !trackPredict.active) return;
-  float lat, lon, alt;
-  if (!trackPredictTick(nowUs, trackHome, &lat, &lon, &alt)) return;
-  applyTrackLatLonAlt(lat, lon, alt, nullptr);
+  // Never steer from predict/search while disarmed — even if a TARGET was accepted earlier.
+  if (!armed || estopLatched) return;
+  if (!trackHome.valid || !trackPredict.active || !trackPredict.lastMeasUs) return;
+  const float age = (nowUs - trackPredict.lastMeasUs) * 1e-6f;
+
+  if (trackPredict.enabled) {
+    float lat, lon, alt;
+    if (trackPredictTick(nowUs, trackHome, &lat, &lon, &alt)) {
+      trackSearchStop();
+      applyTrackLatLonAlt(lat, lon, alt, nullptr);
+      return;
+    }
+  }
+
+  float az, el;
+  if (!trackSearchTick(nowUs, age, &az, &el)) return;
+  if (!trackSearch.announced) {
+    trackSearch.announced = true;
+    char msg[96];
+    snprintf(msg, sizeof(msg), "Track SEARCH spiral · %.0f°/s from az %.0f el %.0f",
+             trackSearch.speedDegS, trackSearch.startAz, trackSearch.startEl);
+    queueControlMessage(msg);
+  }
+  applyTrackAzEl(az, el, nullptr);
 }
 
 void command(const char *line) {
@@ -144,7 +175,8 @@ void command(const char *line) {
       stopOutput(0); stopOutput(1);
       queueControlMessage("Track off"); return;
     }
-    float lat = NAN, lon = NAN, alt = NAN, decl = NAN, align = NAN, lead = NAN; int end = 0, invert = -1, pred = -1;
+    float lat = NAN, lon = NAN, alt = NAN, decl = NAN, align = NAN, lead = NAN, searchSpeed = NAN, searchGap = NAN;
+    int end = 0, invert = -1, pred = -1, search = -1;
     if (sscanf(line, "TRACK HOME %f %f %f %n", &lat, &lon, &alt, &end) == 3 && end && !line[end]) {
       if (!validTrackHomeCoords(lat, lon, alt)) {
         queueControlMessage("Track error: invalid HOME lat lon alt"); return;
@@ -184,12 +216,41 @@ void command(const char *line) {
       queueControlMessage(pred ? "Track PREDICT on" : "Track PREDICT off"); return;
     }
     end = 0;
+    if (sscanf(line, "TRACK SEARCH %d %n", &search, &end) == 1 && end && !line[end] && (search == 0 || search == 1)) {
+      trackSearchSetEnabled(search != 0);
+      queueControlMessage(search ? "Track SEARCH on" : "Track SEARCH off"); return;
+    }
+    end = 0;
+    if (sscanf(line, "TRACK SEARCH_SPEED %f %n", &searchSpeed, &end) == 1 && end && !line[end]) {
+      if (!isfinite(searchSpeed) || searchSpeed < kTrackSearchSpeedMin || searchSpeed > kTrackSearchSpeedMax) {
+        queueControlMessage("Track error: SEARCH_SPEED 5..120 °/s"); return;
+      }
+      trackSearchSetSpeed(searchSpeed);
+      char msg[72];
+      snprintf(msg, sizeof(msg), "Track SEARCH_SPEED %.0f°/s", trackSearch.speedDegS);
+      queueControlMessage(msg); return;
+    }
+    end = 0;
+    if (sscanf(line, "TRACK SEARCH_GAP %f %n", &searchGap, &end) == 1 && end && !line[end]) {
+      if (!isfinite(searchGap) || searchGap < kTrackSearchGapMinS || searchGap > kTrackSearchGapMaxS) {
+        queueControlMessage("Track error: SEARCH_GAP 0.5..60 s"); return;
+      }
+      trackSearchSetGap(searchGap);
+      char msg[72];
+      snprintf(msg, sizeof(msg), "Track SEARCH_GAP %.2fs", trackSearch.gapS);
+      queueControlMessage(msg); return;
+    }
+    end = 0;
     if (sscanf(line, "TRACK TARGET %f %f %f %n", &lat, &lon, &alt, &end) == 3 && end && !line[end]) {
+      if (!armed || estopLatched) {
+        queueControlMessage("Track error: enable servos before TARGET"); return;
+      }
       if (!trackHome.valid) { queueControlMessage("Track error: set TRACK HOME first"); return; }
       if (!isfinite(lat) || !isfinite(lon) || !isfinite(alt) || fabsf(lat) > 90.f || fabsf(lon) > 180.f ||
           alt < 0.f || alt > 100000.f) {
         queueControlMessage("Track error: invalid TARGET lat lon alt"); return;
       }
+      trackSearchStop();
       float aimLat = lat, aimLon = lon, aimAlt = alt;
       trackPredictOnTarget(lat, lon, alt, esp_timer_get_time(), trackHome, &aimLat, &aimLon, &aimAlt);
       const char *err = nullptr;
@@ -204,7 +265,7 @@ void command(const char *line) {
                azTrue, el, trackPredict.lastLeadS, trackPredict.coasting ? " coast" : "");
       queueControlMessage(msg); return;
     }
-    queueControlMessage("Track error: expected HOME|DECL|ALIGN|INVERT|LEAD|PREDICT|TARGET|OFF"); return;
+    queueControlMessage("Track error: expected HOME|DECL|ALIGN|INVERT|LEAD|PREDICT|SEARCH|SEARCH_SPEED|SEARCH_GAP|TARGET|OFF"); return;
   }
   if (!strncmp(line, "PAN ", 4)) {
     if (!strcmp(line,"PAN SAVE")) {

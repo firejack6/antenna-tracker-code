@@ -7,6 +7,7 @@
 #include "servo_motion_math.h"
 #include "pan_mag_heading.h"
 #include "continuous_speed_control.h"
+#include "track_predict.h"
 #include <esp_timer.h>
 #include <driver/ledc.h>
 #include <driver/mcpwm.h>
@@ -34,13 +35,20 @@ static void updatePanMagFeedback(uint64_t now) {
 }
 
 void cancelServoMotion() {
+  // Link loss / transport drop: kill every PWM channel and disarm. Re-ENABLE is
+  // required after reconnect — never keep ARMED=1 across a dead link.
+  const bool wasArmed = armed;
+  portENTER_CRITICAL(&servoMux);
+  armed = false;
+  portEXIT_CRITICAL(&servoMux);
+  trackPredictReset();
   for (int i = 0; i < 3; ++i) {
-    // A held pulse keeps a continuous servo MOVING. Remove PWM on link loss.
-    if ((continuous(i) || (i < 2 && positionActive[i]) || manualDirect[i]) && enabled[i]) stopOutput(i);
+    if (ready[i]) stopOutput(i);
     targetPulseUs[i] = pulseUs[i]; rampPulseUs[i] = pulseUs[i];
   }
   lastMotionUs = esp_timer_get_time();
   for (int i = 0; i < 2; ++i) { trajectoryVelocity[i] = 0; trackingFaultStartedUs[i] = 0; }
+  if (wasArmed) safetyState(); // Host must see ARMED=0 immediately, not only via binary frame.
 }
 
 void updateServoMotion() {

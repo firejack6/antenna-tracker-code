@@ -17,6 +17,7 @@
 #include <esp_timer.h>
 #include "pan_calibration.h"
 #include "track_geo.h"
+#include "track_predict.h"
 
 extern bool handleSensorCommand(const char *line);
 float panMaxSpeedDegPerSec = panDefaultMaxSpeedDegPerSec;
@@ -122,6 +123,9 @@ bool feedbackFresh(const ServoFeedback &fb, int i, uint64_t now) {
   return fb.deviceUs && now >= fb.deviceUs && now - fb.deviceUs <= servoFeedbackTimeoutUs && isfinite(feedbackAngle(fb, i));
 }
 bool applyPulse(int i, float pulse) {
+  // Hard gate: no PWM edges unless explicitly armed. Callers also check, but
+  // this is the last line of defense (TRACK, motion task, sweeps, etc.).
+  if (!armed || estopLatched || !ready[i]) return false;
   if (i == 1) {
     // 3.2 MHz timer: 0.3125-us pulse steps at either 50 or 100 Hz.
     // Preserve fractional controller output instead of rounding to whole us.
@@ -184,12 +188,14 @@ bool safetyCommand(const char *line) {
     armed = false;
     if (!strcmp(action, "ESTOP")) estopLatched = true;
     portEXIT_CRITICAL(&servoMux);
+    trackPredictReset(); // Disarm must kill TRACK predict/search, not only PWM.
     for (int i = 0; i < 3; ++i) if (ready[i]) stopOutput(i);
   } else if (!strcmp(action, "ENABLE")) {
     if (estopLatched) { queueControlMessage("Servo error: E-stop latched; clear it before enabling"); return true; }
     portENTER_CRITICAL(&servoMux); armed = true; portEXIT_CRITICAL(&servoMux);
   } else if (!strcmp(action, "CLEAR")) {
     // Clearing never restores PWM or arms the outputs.
+    trackPredictReset();
     for (int i = 0; i < 3; ++i) if (ready[i]) stopOutput(i);
     portENTER_CRITICAL(&servoMux); armed = false; estopLatched = false; portEXIT_CRITICAL(&servoMux);
   } else { queueControlMessage("Servo error: expected SERVOS ENABLE, DISABLE, ESTOP, or CLEAR"); return true; }
@@ -203,9 +209,16 @@ using namespace servo_internal;
 void initServoOutputs() {
   loadPanSettings(); // Configuration only: never restore output/arming state.
   loadTrackHome();
+  // Fail-safe defaults every boot / after DFU — never wake armed.
+  armed = false;
+  estopLatched = false;
   for (int i = 0; i < 3; ++i) {
     const auto &c = SERVO_CONFIG[i];
     if (!validConfig(c)) { Serial.println("Servo error: invalid configuration"); continue; }
+    // Hold the pin low as GPIO before attaching PWM so boot/DFU cannot float
+    // the line into a servo-moving pulse train.
+    pinMode(c.gpio, OUTPUT);
+    digitalWrite(c.gpio, LOW);
     if (i == 1) {
       mcpwm_config_t config = {};
       config.frequency = c.centerFrequencyHz; config.counter_mode = MCPWM_UP_COUNTER;
@@ -232,6 +245,7 @@ void initServoOutputs() {
     targetPulseUs[i] = pulseUs[i]; rampPulseUs[i] = pulseUs[i];
     if (ready[i]) stopOutput(i);
   }
+  safetyState(); // Tell the host ARMED=0 ESTOP=0 immediately after init.
 }
 
 void readServoCommands(bool reset) {

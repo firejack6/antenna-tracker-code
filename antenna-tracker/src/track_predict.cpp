@@ -2,6 +2,7 @@
 #include <math.h>
 
 TrackPredictor trackPredict;
+TrackSearch trackSearch;
 
 namespace {
 
@@ -65,6 +66,34 @@ void extrapolate(uint64_t nowUs, const TrackHome &home,
 
 }  // namespace
 
+void trackSearchStop() {
+  trackSearch.active = false;
+  trackSearch.announced = false;
+  trackSearch.phiDeg = 0.f;
+  trackSearch.lastUs = 0;
+}
+
+void trackSearchNoteAim(float azTrue, float el) {
+  float az = azTrue;
+  while (az < 0.f) az += 360.f;
+  while (az >= 360.f) az -= 360.f;
+  trackSearch.startAz = az;
+  trackSearch.startEl = clampf(el, -5.f, 85.f);
+}
+
+void trackSearchSetEnabled(bool on) {
+  trackSearch.enabled = on;
+  if (!on) trackSearchStop();
+}
+
+void trackSearchSetSpeed(float degS) {
+  trackSearch.speedDegS = clampf(degS, kTrackSearchSpeedMin, kTrackSearchSpeedMax);
+}
+
+void trackSearchSetGap(float seconds) {
+  trackSearch.gapS = clampf(seconds, kTrackSearchGapMinS, kTrackSearchGapMaxS);
+}
+
 void trackPredictReset() {
   trackPredict.active = false;
   trackPredict.haveVel = false;
@@ -73,6 +102,7 @@ void trackPredictReset() {
   trackPredict.ve = trackPredict.vn = trackPredict.vu = 0;
   trackPredict.emaDt = 1.f;
   trackPredict.lastLeadS = 0;
+  trackSearchStop();
 }
 
 void trackPredictSetEnabled(bool on) {
@@ -152,5 +182,38 @@ bool trackPredictTick(uint64_t nowUs, const TrackHome &home,
   }
   trackPredict.coasting = true;
   extrapolate(nowUs, home, outLat, outLon, outAlt);
+  return true;
+}
+
+bool trackSearchTick(uint64_t nowUs, float ageS, float *outAz, float *outEl) {
+  const float gapS = trackSearch.gapS > 0.f ? trackSearch.gapS : kTrackSearchGapDefaultS;
+  if (!trackSearch.enabled || ageS < gapS) {
+    if (ageS < gapS) trackSearchStop();
+    return false;
+  }
+  if (!trackSearch.active) {
+    trackSearch.active = true;
+    trackSearch.announced = false;
+    trackSearch.phiDeg = 0.f;
+    trackSearch.lastUs = nowUs;
+    return false;
+  }
+  if (!trackSearch.lastUs || nowUs <= trackSearch.lastUs) {
+    trackSearch.lastUs = nowUs;
+    return false;
+  }
+  const float dt = (nowUs - trackSearch.lastUs) * 1e-6f;
+  trackSearch.lastUs = nowUs;
+  if (dt <= 0.f || dt > 0.5f) return false;
+
+  trackSearch.phiDeg += trackSearch.speedDegS * dt;
+  float radius = (trackSearch.pitchDegPerRev / 360.f) * trackSearch.phiDeg;
+  if (radius > trackSearch.maxRadiusDeg) radius = trackSearch.maxRadiusDeg;
+  const float rad = trackSearch.phiDeg * kDeg;
+  float az = trackSearch.startAz + radius * cosf(rad);
+  while (az < 0.f) az += 360.f;
+  while (az >= 360.f) az -= 360.f;
+  *outAz = az;
+  *outEl = clampf(trackSearch.startEl + radius * sinf(rad), -5.f, 85.f);
   return true;
 }

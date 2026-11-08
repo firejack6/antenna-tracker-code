@@ -1,21 +1,26 @@
 """Replay flight track files as TRACK TARGET lat lon alt on the ESP32.
 
-Playback uses each sample's native timestamps (wall-clock pacing). No resampling.
+Dashboard "Start tracking" spawns dashboard/radio_feed.py as a separate process
+that paces samples in true wall-clock time (gaps are real silence — no sleep
+cap / catch-up). That mirrors radio→host→TRACK TARGET.
 """
 from __future__ import annotations
 
 import csv
 import json
 import math
-import queue
+import re
+import subprocess
+import sys
 import threading
-import time
 from datetime import datetime
 from pathlib import Path
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
 FT_TO_M = 0.3048
-MAX_INTER_SAMPLE_SLEEP_S = 2.0
+RADIO_FEED = Path(__file__).resolve().with_name("radio_feed.py")
+OPENSKY_FEED = Path(__file__).resolve().with_name("opensky_feed.py")
+_ICAO_RE = re.compile(r"^[0-9a-fA-F]{6}$")
 
 
 def _safe_name(name: str) -> str:
@@ -121,6 +126,72 @@ def _normalize_site(item: dict) -> dict | None:
     }
 
 
+def _site_id(label: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (label or "").strip().lower()).strip("-")
+    return (slug[:64] or "site")
+
+
+def save_site(data: dict) -> dict:
+    """Upsert a named site into testdata/sites.json (same catalog as playback homes)."""
+    label = str(data.get("label") or "").strip()
+    if not label:
+        raise ValueError("Site needs a name")
+    try:
+        lat = float(data["lat"])
+        lon = float(data["lon"])
+        alt = float(data.get("alt") or 0)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Site needs numeric lat lon alt") from exc
+    sid = str(data.get("id") or "").strip() or _site_id(label)
+    notes = str(data.get("notes") or "").strip()
+    site = _normalize_site({
+        "id": sid,
+        "label": label,
+        "lat": lat,
+        "lon": lon,
+        "alt": alt,
+        "notes": notes,
+        "flights": [],
+    })
+    if not site:
+        raise ValueError("Site lat/lon/alt out of range")
+
+    TESTDATA.mkdir(parents=True, exist_ok=True)
+    path = TESTDATA / "sites.json"
+    sites: list[dict] = []
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            sites = list(raw.get("sites") or [])
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            sites = []
+
+    stored = {
+        "id": site["id"],
+        "label": site["label"],
+        "lat": site["lat"],
+        "lon": site["lon"],
+        "alt": site["alt"],
+        "notes": site["notes"],
+    }
+    replaced = False
+    for i, item in enumerate(sites):
+        if str(item.get("id") or "") == site["id"]:
+            prev_flights = list(item.get("flights") or [])
+            if prev_flights:
+                stored["flights"] = prev_flights
+            sites[i] = stored
+            replaced = True
+            break
+    if not replaced:
+        sites.append(stored)
+
+    path.write_text(json.dumps({"sites": sites}, indent=2) + "\n", encoding="utf-8")
+    # Re-read via list_sites so playback home sidecars stay merged in.
+    refreshed = next((s for s in list_sites() if s["id"] == site["id"]), site)
+    return {"ok": True, "site": refreshed, "sites": list_sites()}
+
+
 def list_flights() -> list[dict]:
     if not TESTDATA.is_dir():
         return []
@@ -165,12 +236,22 @@ def flight_meta(name: str) -> dict:
 
 def _label(name: str) -> str:
     stem = Path(name).stem
+    gap_tag = None
+    for tag in ("-gap10s", "_gap10s", "-gap5s", "_gap5s"):
+        if stem.endswith(tag):
+            gap_tag = tag.lstrip("-_")
+            stem = stem[: -len(tag)]
+            break
     for junk in (" (1)", "_10hz", "_summary"):
         stem = stem.replace(junk, "")
     if stem.startswith("GPS Data - "):
-        return stem[len("GPS Data - ") :]
+        stem = stem[len("GPS Data - ") :]
     if stem.startswith("Altimeter Data - "):
-        return stem[len("Altimeter Data - ") :]
+        stem = stem[len("Altimeter Data - ") :]
+    if gap_tag == "gap10s":
+        return f"{stem} · 10s gap before peak accel"
+    if gap_tag == "gap5s":
+        return f"{stem} · 5s gap before peak accel"
     return stem
 
 
@@ -336,8 +417,9 @@ class TrackSim:
     def __init__(self, relay):
         self.relay = relay
         self._lock = threading.Lock()
-        self._thread: threading.Thread | None = None
-        self._stop = threading.Event()
+        self._proc: subprocess.Popen | None = None
+        self._reader: threading.Thread | None = None
+        self._stopping = False
         self.state = {
             "active": False,
             "file": None,
@@ -359,130 +441,246 @@ class TrackSim:
         with self._lock:
             return dict(self.state)
 
-    def _queue(self, line: str) -> bool:
+    def _relay_base(self) -> str:
+        port = getattr(self.relay, "http_port", None) or getattr(self.relay, "port", None)
+        if port:
+            return f"http://127.0.0.1:{int(port)}"
+        return "http://127.0.0.1:8765"
+
+    def _apply_status(self, status: dict) -> None:
+        keys = (
+            "active", "file", "index", "n", "t", "duration_s",
+            "lat", "lon", "alt", "az", "el", "range_m", "pan", "message",
+            "icao24", "callsign",
+        )
+        with self._lock:
+            for key in keys:
+                if key in status:
+                    self.state[key] = status[key]
+
+    def _read_stdout(self, proc: subprocess.Popen) -> None:
+        assert proc.stdout is not None
         try:
-            self.relay.commands.put_nowait(line.encode("ascii"))
-            return True
-        except queue.Full:
-            return False
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    status = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(status, dict):
+                    self._apply_status(status)
+        finally:
+            code = proc.wait()
+            with self._lock:
+                still = self._proc is proc
+                if still:
+                    self._proc = None
+                if still and not self._stopping:
+                    self.state["active"] = False
+                    if not self.state.get("message") or self.state["message"] == "idle":
+                        self.state["message"] = (
+                            f"radio-feed exit {code}" if code else "done"
+                        )
+            if still and not self._stopping:
+                try:
+                    self.relay.command_track_off()
+                except Exception:
+                    pass
 
     def stop_sim(self, send_off: bool = True):
-        self._stop.set()
-        t = self._thread
-        if t and t.is_alive():
-            t.join(timeout=2.0)
+        self._stopping = True
+        proc = self._proc
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    pass
+        reader = self._reader
+        if reader and reader.is_alive():
+            reader.join(timeout=1.5)
         with self._lock:
             self.state["active"] = False
             self.state["message"] = "stopped"
-            self._thread = None
+            self._proc = None
+            self._reader = None
+        self._stopping = False
         if send_off:
-            self._queue("TRACK OFF\n")
+            try:
+                self.relay.command_track_off()
+            except Exception:
+                pass
+
+    def _spawn(self, cmd: list[str], cwd: Path, label: str, state: dict) -> dict:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        self._stopping = False
+        self._proc = proc
+        with self._lock:
+            self.state.update(state)
+        self._reader = threading.Thread(
+            target=self._read_stdout, args=(proc,), name=f"{label}-stdout", daemon=True
+        )
+        self._reader.start()
+        with self._lock:
+            snap = dict(self.state)
+        snap["ok"] = True
+        snap["message"] = state.get("message") or f"started {label}"
+        return snap
 
     def start(self, body: dict) -> dict:
-        name = _safe_name(body.get("file") or "testdata1.csv")
-        samples = load_flight(name)
         home_lat = float(body["lat"])
         home_lon = float(body["lon"])
         home_alt = float(body.get("alt") or 0)
-        pan_align = float(body.get("pan_align") if body.get("pan_align") is not None else 0)
         decl = float(body.get("mag_declination") or 0)
-        pan_invert = bool(body.get("pan_invert"))
+        icao24 = str(body.get("icao24") or "").strip().lower()
 
         self.stop_sim(send_off=False)
-        self._stop.clear()
-        duration = samples[-1]["t"] - samples[0]["t"]
-        t_flight0 = samples[0]["t"]
 
-        # HOME before TARGET (same as map go-to)
+        if icao24:
+            if not _ICAO_RE.match(icao24):
+                raise ValueError("icao24 must be 6 hex characters (e.g. a1b2c3)")
+            if not OPENSKY_FEED.is_file():
+                raise FileNotFoundError(f"opensky feed script missing: {OPENSKY_FEED}")
+            # point=False → observe-only (poll UI/map, no TRACK TARGET / no HOME).
+            point = bool(body.get("point", True))
+            if point:
+                # HOME + decl; relay also forces Mag PAN feedback (no pot ALIGN).
+                self.relay.command_track_home(
+                    {
+                        "lat": home_lat,
+                        "lon": home_lon,
+                        "alt": home_alt,
+                        "mag_declination": decl,
+                    }
+                )
+            interval = body.get("interval")
+            idle_stop = body.get("idle_stop", 600)
+            cmd = [
+                sys.executable,
+                str(OPENSKY_FEED),
+                icao24,
+                "--relay",
+                self._relay_base(),
+                "--lat",
+                str(home_lat),
+                "--lon",
+                str(home_lon),
+                "--alt",
+                str(home_alt),
+                "--decl",
+                str(decl),
+                "--idle-stop",
+                str(float(idle_stop) if idle_stop is not None else 600),
+            ]
+            if not point:
+                cmd.append("--observe")
+            if interval is not None and str(interval) != "":
+                cmd.extend(["--interval", str(float(interval))])
+            return self._spawn(
+                cmd,
+                OPENSKY_FEED.parent,
+                "opensky-feed",
+                {
+                    "active": True,
+                    "file": f"opensky:{icao24}",
+                    "icao24": icao24,
+                    "index": 0,
+                    "n": 0,
+                    "t": 0.0,
+                    "duration_s": 0.0,
+                    "lat": None,
+                    "lon": None,
+                    "alt": None,
+                    "az": None,
+                    "el": None,
+                    "range_m": None,
+                    "pan": None,
+                    "pointing": point,
+                    "message": (
+                        f"opensky-feed {icao24}"
+                        + (" · pointing" if point else " · observe")
+                    ),
+                },
+            )
+
+        # Playback: HOME + decl; relay also forces Mag PAN feedback (no pot ALIGN).
         self.relay.command_track_home(
             {
                 "lat": home_lat,
                 "lon": home_lon,
                 "alt": home_alt,
                 "mag_declination": decl,
-                "pan_align": pan_align,
-                "pan_invert": pan_invert,
             }
         )
 
-        def run():
-            with self._lock:
-                self.state.update(
-                    {
-                        "active": True,
-                        "file": name,
-                        "index": 0,
-                        "n": len(samples),
-                        "t": 0.0,
-                        "duration_s": duration,
-                        "message": f"replaying {name} ({len(samples)} pts, {duration:.1f}s native)",
-                    }
-                )
-            t_wall0 = time.monotonic()
-            sent = 0
-            coalesced = 0
-            i = 0
-            last_sent_i = -1
-            while i < len(samples) and not self._stop.is_set():
-                elapsed = time.monotonic() - t_wall0
-                # Catch up to the sample due at this wall time (native timing, no resample)
-                while i + 1 < len(samples) and (samples[i + 1]["t"] - t_flight0) <= elapsed:
-                    i += 1
-                    if last_sent_i >= 0:
-                        coalesced += 1
-
-                p = samples[i]
-                if i != last_sent_i:
-                    az, el, rng, _ = bearing_range_el(
-                        home_lat, home_lon, home_alt, p["lat"], p["lon"], p["alt"]
-                    )
-                    az_mag = (az - decl + 360.0) % 360.0
-                    pan = ((az_mag - pan_align + 180.0) % 360.0) - 180.0
-                    if pan_invert:
-                        pan = -pan
-                    cmd = f"TRACK TARGET {p['lat']:.8f} {p['lon']:.8f} {p['alt']:g}\n"
-                    if self._queue(cmd):
-                        sent += 1
-                        last_sent_i = i
-                    with self._lock:
-                        self.state.update(
-                            {
-                                "index": i + 1,
-                                "t": p["t"] - t_flight0,
-                                "lat": p["lat"],
-                                "lon": p["lon"],
-                                "alt": p["alt"],
-                                "az": az,
-                                "el": el,
-                                "range_m": rng,
-                                "pan": pan,
-                                "message": f"{name} {i + 1}/{len(samples)} t={p['t'] - t_flight0:.2f}s",
-                            }
-                        )
-
-                if i + 1 >= len(samples):
-                    break
-                next_due = t_wall0 + (samples[i + 1]["t"] - t_flight0)
-                remain = next_due - time.monotonic()
-                if remain > 0:
-                    time.sleep(min(remain, MAX_INTER_SAMPLE_SLEEP_S))
-                i += 1
-
-            with self._lock:
-                self.state["active"] = False
-                self.state["message"] = (
-                    f"done {name}: sent={sent} coalesced={coalesced}"
-                    if not self._stop.is_set()
-                    else "stopped"
-                )
-            self._queue("TRACK OFF\n")
-
-        self._thread = threading.Thread(target=run, name="track-sim", daemon=True)
-        self._thread.start()
-        with self._lock:
-            snap = dict(self.state)
-        snap["ok"] = True
+        name = _safe_name(body.get("file") or "testdata1.csv")
+        if not RADIO_FEED.is_file():
+            raise FileNotFoundError(f"radio feed script missing: {RADIO_FEED}")
+        samples = load_flight(name)
+        speed = float(body.get("speed") or 1.0)
+        duration = samples[-1]["t"] - samples[0]["t"]
+        cmd = [
+            sys.executable,
+            str(RADIO_FEED),
+            name,
+            "--relay",
+            self._relay_base(),
+            "--lat",
+            str(home_lat),
+            "--lon",
+            str(home_lon),
+            "--alt",
+            str(home_alt),
+            "--decl",
+            str(decl),
+            "--speed",
+            str(speed),
+        ]
+        snap = self._spawn(
+            cmd,
+            RADIO_FEED.parent,
+            "radio-feed",
+            {
+                "active": True,
+                "file": name,
+                "index": 0,
+                "n": len(samples),
+                "t": 0.0,
+                "duration_s": duration,
+                "lat": None,
+                "lon": None,
+                "alt": None,
+                "az": None,
+                "el": None,
+                "range_m": None,
+                "pan": None,
+                "message": f"radio-feed {name} ({len(samples)} pts, {duration:.1f}s realtime)",
+            },
+        )
         snap["points"] = len(samples)
         snap["duration_s"] = duration
-        snap["message"] = f"started {name} ({len(samples)} pts, {duration:.1f}s)"
+        snap["message"] = (
+            f"started radio-feed {name} ({len(samples)} pts, {duration:.1f}s realtime)"
+        )
         return snap

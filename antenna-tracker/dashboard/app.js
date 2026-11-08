@@ -421,9 +421,10 @@ for (const [axis, pin] of [['PAN', 1], ['TILT', 2], ['S3', 3]]) {
     });
   }
 }
-// Keep each axis's controls, readback and plots together.
+// Keep each axis's controls, readback and plots together (Advanced area — not under Connect).
 const servoPanel = document.querySelector('.servo-panel');
-document.querySelector('.connection').after(servoPanel);
+const servoAnchor = document.querySelector('.advanced-panel') || document.querySelector('.health-panel') || document.querySelector('.connection');
+servoAnchor.after(servoPanel);
 for (const axis of ['PAN','TILT','S3']) {
   const form = $(`servo-${axis}`);
   const card = document.createElement('article'); card.className = 'servo-axis-card';
@@ -436,7 +437,8 @@ for (const axis of ['PAN','TILT','S3']) {
   layout.append(plots);
 }
 // Secondary telemetry remains available without crowding the control view.
-for (const panel of document.querySelectorAll('main section.panel:not(.connection):not(.servo-panel):not(.recording-panel):not(.map-panel):not(.tune-panel)')) {
+for (const panel of document.querySelectorAll('main section.panel:not(.connection):not(.servo-panel):not(.recording-panel):not(.map-panel):not(.tune-panel):not(.advanced-panel):not(.adc-panel):not(.digital-panel):not(.orientation-panel):not(.sampling-panel)')) {
+  if (panel.closest('.imu-sensor-grid')) continue;
   const title = panel.querySelector('h2')?.textContent;
   if (!title) continue;
   const disclosure = document.createElement('details'); disclosure.className = 'telemetry-disclosure';
@@ -692,8 +694,33 @@ async function poll() {
     document.body.classList.add('stale');
   } finally {
     updateButtons();
-    setTimeout(poll, document.body.classList.contains('map-view') ? 150 : 40);
+    setTimeout(poll, document.body.classList.contains('map-view') || document.body.classList.contains('track-view') ? 150 : 40);
   }
+}
+
+function renderTrackChrome(latest, stale, attitude, orientationStale) {
+  const recording = state?.recording;
+  $('record-start').disabled = !relayUp || recordingBusy || recording?.active || recording?.finishing || state?.status !== 'connected';
+  $('record-stop').disabled = !relayUp || recordingBusy || !(recording?.active || recording?.finishing);
+  $('record-status').textContent = recording?.error || (recording?.filename ?
+    `${recording.active ? 'Recording' : recording.finishing ? 'Finishing' : 'Saved'} ${Number(recording.rows).toLocaleString()} rows · ${recording.path}` : 'Live viewing continues with recording off.');
+  $('record-download').hidden = !recording?.filename || recording.active || recording.finishing;
+  if (recording?.filename) $('record-download').href = `/api/recording/download?file=${encodeURIComponent(recording.filename)}`;
+  $('orientation-state').textContent = !attitude ? 'Waiting for acceleration' : orientationStale ? 'Stale estimate' : 'Sensor-frame estimate';
+  $('orientation-state').className = `badge ${attitude && !orientationStale ? 'live' : 'warn'}`;
+  $('orientation-values').textContent = attitude ? `Roll ${attitude.roll.toFixed(1)}° · Pitch ${attitude.pitch.toFixed(1)}° · Heading ${attitude.heading == null ? 'unavailable' : attitude.heading.toFixed(1) + '°'}` : 'No valid orientation estimate';
+  drawOrientation($('orientation-indicator'), attitude, orientationStale || !attitude);
+  const safety = state?.servo_safety;
+  const safetyFresh = safety && Date.now() / 1000 - safety.received_at <= 3;
+  const connected = relayUp && state?.status === 'connected';
+  const safetyPending = state?.safety_command && ['queued', 'sent', 'timeout'].includes(state.safety_command.state);
+  $('servo-enable').disabled = !connected || !safetyFresh || safetyBusy || safetyPending || !!safety?.estop || !!safety?.armed;
+  $('servo-clear').disabled = !connected || !safetyFresh || safetyBusy || safetyPending || !safety?.estop;
+  $('servo-disable').disabled = !connected;
+  $('servo-estop').disabled = !connected;
+  $('servo-safety-state').textContent = !safetyFresh ? 'Servo state unconfirmed' : safety.estop ? 'E-STOP LATCHED · all PWM off' : safety.armed ? 'Enabled · commands allowed' : 'Disabled · all PWM off';
+  $('servo-safety-state').classList.toggle('stopped', !!safety?.estop);
+  if (state?.safety_command) $('servo-safety-message').textContent = state.safety_command.message;
 }
 
 function renderMapOnly() {
@@ -713,6 +740,7 @@ function renderMapOnly() {
       latest?.effective_config?.pan_fb);
     if (state?.track_sim) deviceMap.applyRelaySim(state.track_sim);
   }
+  renderTrackChrome(latest, stale, attitude, orientationStale);
   if (state && relayUp) {
     let label = state.status === 'connected' ? (age > 3 ? 'Waiting for data' : 'Live') : state.status;
     if (state.mode === 'demo') label = `DEMO · ${label}`;
@@ -725,18 +753,11 @@ function renderMapOnly() {
 }
 
 function render() {
-  // Map tab: do not thrash the hidden Controls DOM/charts — that freezes Firefox after Leaflet opens.
-  if (document.body.classList.contains('map-view')) {
+  // Track tab: do not thrash the hidden Advanced DOM/charts — that freezes Firefox after Leaflet opens.
+  if (document.body.classList.contains('map-view') || document.body.classList.contains('track-view')) {
     renderMapOnly();
     return;
   }
-  const recording = state?.recording;
-  $('record-start').disabled = !relayUp || recordingBusy || recording?.active || recording?.finishing || state?.status !== 'connected';
-  $('record-stop').disabled = !relayUp || recordingBusy || !(recording?.active || recording?.finishing);
-  $('record-status').textContent = recording?.error || (recording?.filename ?
-    `${recording.active ? 'Recording' : recording.finishing ? 'Finishing' : 'Saved'} ${Number(recording.rows).toLocaleString()} rows · ${recording.path}` : 'Live viewing continues with recording off.');
-  $('record-download').hidden = !recording?.filename || recording.active || recording.finishing;
-  if (recording?.filename) $('record-download').href = `/api/recording/download?file=${encodeURIComponent(recording.filename)}`;
   const rawMode = $('adc-units').value === 'raw';
   const scaling = channelScaling[selectedChannel];
   $('adc-range').textContent = rawMode ? '12-bit · 0–4095 counts' : `0–${ADC_FULL_SCALE} V input · y = m × volts + b · CH ${selectedChannel}: ${scaling.unit || 'scaled value'}`;
@@ -754,21 +775,10 @@ function render() {
     stale,
     latest?.effective_config?.pan_fb);
   if (typeof panTune !== 'undefined') panTune.update(attitude?.heading, latest);
-  $('orientation-state').textContent = !attitude ? 'Waiting for acceleration' : orientationStale ? 'Stale estimate' : 'Sensor-frame estimate';
-  $('orientation-state').className = `badge ${attitude && !orientationStale ? 'live' : 'warn'}`;
-  $('orientation-values').textContent = attitude ? `Roll ${attitude.roll.toFixed(1)}° · Pitch ${attitude.pitch.toFixed(1)}° · Heading ${attitude.heading == null ? 'unavailable' : attitude.heading.toFixed(1) + '°'}` : 'No valid orientation estimate';
-  drawOrientation($('orientation-indicator'), attitude, orientationStale || !attitude);
+  renderTrackChrome(latest, stale, attitude, orientationStale);
   const safety = state?.servo_safety;
   const safetyFresh = safety && Date.now() / 1000 - safety.received_at <= 3;
   const connected = relayUp && state?.status === 'connected';
-  const safetyPending = state?.safety_command && ['queued', 'sent', 'timeout'].includes(state.safety_command.state);
-  $('servo-enable').disabled = !connected || !safetyFresh || safetyBusy || safetyPending || !!safety?.estop || !!safety?.armed;
-  $('servo-clear').disabled = !connected || !safetyFresh || safetyBusy || safetyPending || !safety?.estop;
-  $('servo-disable').disabled = !connected;
-  $('servo-estop').disabled = !connected;
-  $('servo-safety-state').textContent = !safetyFresh ? 'Servo state unconfirmed' : safety.estop ? 'E-STOP LATCHED · all PWM off' : safety.armed ? 'Enabled · commands allowed' : 'Disabled · all PWM off';
-  $('servo-safety-state').classList.toggle('stopped', !!safety?.estop);
-  if (state?.safety_command) $('servo-safety-message').textContent = state.safety_command.message;
   document.body.classList.toggle('stale', stale);
   const ranges = latest?.ranges;
   for (const id of ['accel-range', 'gyro-range', 'apply-ranges']) $(id).disabled = stale || busy || rangesBusy || ranges?.ready !== 1;
@@ -1349,7 +1359,7 @@ window.addEventListener('resize', render);
 updateButtons(); render(); poll();
 let lastPaint = 0;
 function animatePlots(now) {
-  if (document.body.classList.contains('map-view') || document.hidden) {
+  if (document.body.classList.contains('map-view') || document.body.classList.contains('track-view') || document.hidden) {
     requestAnimationFrame(animatePlots);
     return;
   }

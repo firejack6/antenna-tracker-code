@@ -9,7 +9,9 @@ const panTune = (() => {
   tuneBtn.dataset.view = 'tune';
   tuneBtn.setAttribute('aria-pressed', 'false');
   tuneBtn.textContent = 'Tune';
-  tabs.append(tuneBtn);
+  const insertBefore = tabs.querySelector('[data-view="sensors"]') || tabs.querySelector('[data-view="advanced"]');
+  if (insertBefore) tabs.insertBefore(tuneBtn, insertBefore);
+  else tabs.append(tuneBtn);
 
   const panel = document.createElement('section');
   panel.className = 'panel tune-panel';
@@ -26,7 +28,7 @@ const panTune = (() => {
         <button type="button" id="tune-save" class="secondary">Save PAN settings</button>
       </div>
     </div>
-    <p id="tune-status" role="status">Firmware position feedback: Pot (default). Toggle Mag position to close the on-ESP PID on mag heading — Save PAN to persist.</p>
+    <p id="tune-status" role="status">Firmware position feedback: Mag (default for TRACK). Toggle only if you need Pot for diagnostic sweeps — Save PAN to persist.</p>
     <div class="tune-readout" id="tune-readout">Waiting for telemetry</div>
 
     <div class="tune-hand-panel" id="tune-hand-panel" hidden>
@@ -134,7 +136,8 @@ const panTune = (() => {
   let handLeanWas = null;
   let handSweep = null;
   // Firmware position PID feedback source (SERVO FEEDBACK PAN / ATS1 pan_fb).
-  let fwFeedback = 'POT'; // 'POT' | 'MAG'
+  let fwFeedback = null; // null until board pan_fb — never assume Pot/Mag
+  let boardPanFb = null; // last telemetry pan_fb: 'MAG' | 'POT' | null
   let magTarget = null;
   let magTimer = null;
   // At 5s: STOP if |err| exceeded this limit anytime in the 3–5s window.
@@ -188,22 +191,32 @@ const panTune = (() => {
     const modeBtn = el('tune-mag-mode');
     if (modeBtn) {
       modeBtn.setAttribute('aria-pressed', String(fwMag()));
-      modeBtn.title = fwMag()
-        ? 'Firmware PAN PID feedback = Mag heading (click for Pot)'
-        : 'Firmware PAN PID feedback = Pot (click for Mag heading)';
+      modeBtn.textContent = boardPanFb === 'MAG'
+        ? 'Mag position · board MAG'
+        : boardPanFb === 'POT'
+          ? 'Mag position · board POT'
+          : 'Mag position · board ?';
+      modeBtn.title = `UI ${fwFeedback || '?'} · board ${boardPanFb || 'no pan_fb yet'}. Click toggles SERVO FEEDBACK PAN.`;
+      modeBtn.style.outline = (fwFeedback && boardPanFb && fwFeedback !== boardPanFb)
+        ? '2px solid #ff9d5b'
+        : '';
     }
     if (absLabel) {
       absLabel.childNodes[0].textContent = fwMag() ? 'Absolute mag (°)' : 'Absolute pot (°)';
     }
     if (!label) return;
     const soft = magSoft ? ' · soft-iron' : '';
-    if (fwMag()) {
-      label.textContent = `(FW mag PID${soft})`;
+    if (boardPanFb === 'MAG') {
+      label.textContent = `(board MAG PID${soft})`;
       return;
     }
-    label.textContent = magScale === 1
-      ? `(pot ° · scale 1${soft})`
-      : `(world→pot ×${magScale.toFixed(3)}${soft})`;
+    if (boardPanFb === 'POT') {
+      label.textContent = magScale === 1
+        ? `(board POT ° · scale 1${soft})`
+        : `(board POT · world→pot ×${magScale.toFixed(3)}${soft})`;
+      return;
+    }
+    label.textContent = '(waiting for board pan_fb)';
   }
 
   function applyMagLegend() {
@@ -644,7 +657,7 @@ const panTune = (() => {
     ],
     pid: [
       ['Output', '#4bd3b5'], ['Request', '#f5bd4f'], ['P', '#ff788a'],
-      ['I', '#a88bfa'], ['FF+DB', '#65b5ff'], ['Startup', '#ff9d5b'],
+      ['I', '#a88bfa'], ['D', '#8da6bb'], ['FF+DB', '#65b5ff'], ['Startup', '#ff9d5b'],
     ],
     schedule: [
       ['|Error|°', '#69adff'], ['Blend 0–1', '#61e2bd'], ['Eff Kp', '#f0b76b'],
@@ -795,18 +808,24 @@ const panTune = (() => {
     const cfg = sample.effective_config || {};
     const motion = sample.servo_motion?.PAN || {};
     if (cfg.pan_fb === 1 || cfg.pan_fb === '1' || cfg.pan_fb === 'MAG') {
+      boardPanFb = 'MAG';
       if (fwFeedback !== 'MAG') {
         fwFeedback = 'MAG';
         stopMagCorrector();
-        refreshScaleLabel();
         applyMagLegend();
       }
+      refreshScaleLabel();
     } else if (cfg.pan_fb === 0 || cfg.pan_fb === '0' || cfg.pan_fb === 'POT') {
+      boardPanFb = 'POT';
       if (fwFeedback !== 'POT') {
         fwFeedback = 'POT';
-        refreshScaleLabel();
         applyMagLegend();
       }
+      refreshScaleLabel();
+    } else if (cfg.pan_fb == null) {
+      // Missing pan_fb: do not keep a lit Mag button as proof of Mag PID.
+      boardPanFb = null;
+      refreshScaleLabel();
     }
     syncPair('kp', pos.kp ?? cfg.pan_kp);
     syncPair('ki', pos.ki ?? cfg.pan_ki);
@@ -930,7 +949,7 @@ const panTune = (() => {
     const capNear = cfg.pan_cap_near ?? readNum('cap_near') ?? 100;
 
     const angleSeries = [[], [], [], [], [], []];
-    const pidSeries = [[], [], [], [], [], []];
+    const pidSeries = [[], [], [], [], [], [], []];
     const schedSeries = [[], [], [], [], [], []];
 
     for (const sample of hist) {
@@ -953,8 +972,9 @@ const panTune = (() => {
       pidSeries[1].push({ t, v: pid?.request });
       pidSeries[2].push({ t, v: pid?.p });
       pidSeries[3].push({ t, v: pid?.i });
-      pidSeries[4].push({ t, v: pid?.ff });
-      pidSeries[5].push({ t, v: pid?.startup });
+      pidSeries[4].push({ t, v: pid?.d });
+      pidSeries[5].push({ t, v: pid?.ff });
+      pidSeries[6].push({ t, v: pid?.startup });
 
       const signed = panPointingError(sample);
       const err = Number.isFinite(signed) ? Math.abs(signed) : null;
@@ -1432,25 +1452,24 @@ const panTune = (() => {
     });
   });
 
-  // Hook into existing tab clicks (device-map owns the nav).
+  // device-map owns tab body classes and calls panTune.setVisible; keep panel in sync only.
   tabs.addEventListener('click', event => {
     const button = event.target.closest('[data-view]');
     if (!button) return;
-    const view = button.dataset.view;
-    visible = view === 'tune';
+    const show = button.dataset.view === 'tune';
+    if (show === visible) return;
+    visible = show;
     panel.hidden = !visible;
-    document.body.classList.toggle('tune-view', visible);
-    if (view !== 'map') document.body.classList.remove('map-view');
     if (visible) {
       pullFromTelemetry(latest());
       requestAnimationFrame(paint);
     }
   });
 
-  // When map tab shows, hide tune (device-map sets map-view). Do not mutate body.class
-  // here — that re-enters this observer and can lock up Firefox with the map-view CSS.
+  // When Track shows, hide tune (device-map sets track-view/map-view). Do not mutate body.class
+  // here — that re-enters this observer and can lock up Firefox with the view CSS.
   const observer = new MutationObserver(() => {
-    if (document.body.classList.contains('map-view') && visible) {
+    if ((document.body.classList.contains('map-view') || document.body.classList.contains('track-view')) && visible) {
       visible = false;
       panel.hidden = true;
     }

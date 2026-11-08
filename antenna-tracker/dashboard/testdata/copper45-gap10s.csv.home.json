@@ -1,0 +1,8 @@
+{
+  "id": "copper45-antenna",
+  "label": "copper45 antenna (fake, 500 ft from launch) \u00b7 10s gap",
+  "lat": 28.6086294,
+  "lon": -80.6,
+  "alt": 0,
+  "notes": "Fake antenna site 152.4 m (500 ft) south of launch (28.6100000, -80.6000000). Synthetic 10s TARGET gap [44.60,54.60) just before peak accel at t=45.10s."
+}

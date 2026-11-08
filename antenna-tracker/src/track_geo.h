@@ -31,9 +31,9 @@ struct TrackHome {
   float lat = NAN;
   float lon = NAN;
   float alt = 0;       // antenna AGL m
-  float decl = 0;      // mag declination: true ≈ mag + decl
-  float panAlign = 0;  // pot-frame only
-  bool panInvert = false;
+  float decl = 0;      // mag declination: true ≈ mag + decl (TRACK pan = azTrue − decl)
+  float panAlign = 0;  // pot-era leftover; ignored by Mag TRACK
+  bool panInvert = false; // pot-era leftover; ignored by Mag TRACK
 };
 
 inline bool validTrackHomeCoords(float lat, float lon, float alt) {

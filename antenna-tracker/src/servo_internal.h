@@ -99,6 +99,7 @@ void loadTrackHome();
 // Arm continuous/limited position loop for one axis (Tune SERVO POSITION + TRACK TARGET).
 bool applyPositionTarget(int i, float target, const char **error);
 bool applyTrackLatLonAlt(float lat, float lon, float alt, const char **error);
+bool applyTrackAzEl(float azTrue, float el, const char **error);
 void updateTrackPredictMotion(uint64_t nowUs);
 
 extern TrackHome trackHome;

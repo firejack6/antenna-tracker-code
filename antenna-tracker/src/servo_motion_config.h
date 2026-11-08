@@ -13,9 +13,10 @@
 // are runtime (SERVO SCHEDULE PAN / Save PAN settings).
 //
 // Programmable position feedback source (SERVO FEEDBACK PAN / Save PAN).
+// TRACK / go-to close the PAN PID on mag heading. Pot is Tune/diagnostic only.
 // FUSION is reserved — do not implement until pot min/max/flat scale works.
 enum class PanPositionFeedback : int32_t { Pot = 0, Mag = 1, Fusion = 2 };
-constexpr PanPositionFeedback panPositionFeedbackDefault = PanPositionFeedback::Pot;
+constexpr PanPositionFeedback panPositionFeedbackDefault = PanPositionFeedback::Mag;
 inline bool validPanPositionFeedback(int value) {
   return value == int(PanPositionFeedback::Pot) || value == int(PanPositionFeedback::Mag);
 }
