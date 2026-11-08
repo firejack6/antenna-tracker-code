@@ -58,7 +58,8 @@
     for (const trace of series) {
       const hit = nearest(trace.points, t);
       if (!hit) continue;
-      const text = Number.isFinite(hit.v) ? hit.v.toFixed(decimals) : '—';
+      const places = Number.isFinite(trace.decimals) ? trace.decimals : decimals;
+      const text = Number.isFinite(hit.v) ? hit.v.toFixed(places) : '—';
       lines.push(`${trace.label}: ${text}`);
       rowColors.push(trace.color || '#e7eef8');
       const low = trace.right ? (meta.lowR ?? meta.low) : meta.low;

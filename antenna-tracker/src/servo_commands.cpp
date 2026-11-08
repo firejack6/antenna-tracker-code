@@ -15,6 +15,29 @@
 
 namespace servo_internal {
 
+static float wrapDelta180(float deg) {
+  if (deg > 180.f) deg -= 360.f;
+  else if (deg < -180.f) deg += 360.f;
+  return deg;
+}
+
+// One-shot CR kick past static friction. Used on fresh position and on large
+// retargets while nearly stopped (Tune steps). TRACK slews while moving skip it.
+static void armPanBreakaway(float measured, float target) {
+  if (!isfinite(measured) || !isfinite(target)) return;
+  if (!(panPositionBreakawayOffsetUs > 0 && panPositionBreakawayDurationMs > 0)) return;
+  const float err = wrapDelta180(target - measured);
+  if (!(fabsf(err) > panPositionBreakawayMinErrorDeg)) return;
+  const float blend = fmaxf(panPositionBreakawayMinScale, panPositionErrorBlend(fabsf(err)));
+  positionBreakaway[0] = {};
+  positionBreakaway[0].active = true;
+  positionBreakaway[0].sign = err > 0 ? 1 : -1;
+  positionBreakaway[0].startedUs = esp_timer_get_time();
+  positionBreakaway[0].startAngle = measured;
+  positionBreakaway[0].offsetUs = panPositionBreakawayOffsetUs * blend;
+  positionBreakaway[0].maxUs = uint64_t(panPositionBreakawayDurationMs * 1000.f * blend + .5f);
+}
+
 bool applyPositionTarget(int i, float target, const char **error) {
   static const char *errArmed = "position requires enabled output, fresh feedback, valid limits";
   static const char *errPwm = "angle outside programmed PWM mapping";
@@ -49,19 +72,29 @@ bool applyPositionTarget(int i, float target, const char **error) {
     if (error) *error = errPwm;
     return false;
   }
-  // Already in position mode: retarget in place (no PWM stop / PID reset) so TRACK
-  // samples slew via the existing ramp instead of stair-stepping.
-  if (i < 2 && positionActive[i] && enabled[i]) {
-    positionTarget[i] = target;
-    targetPulseUs[i] = uint32_t(lroundf(targetPulse));
-    return true;
-  }
-  const bool ramp = i == 0 ? panPositionRampEnabled : tiltPositionRampEnabled;
   const auto &servo = SERVO_CONFIG[i];
   const float startAngle = continuous(i)
     ? (panMagMode ? panMagHeadingFilter.heading : feedbackAngle(fb, i))
     : pulseToDeviceAngle(pulseUs[i], servo.minPulseUs, servo.maxPulseUs, minAngle(i), maxAngle(i)) - (i == 1 ? calibration.zeroDeg : 0);
   const float measured = usesImu(i) ? latestTiltImu().angle[tiltImuAxis]-tiltImuZero : startAngle;
+  // Already in position mode: retarget in place (no PWM stop / PID reset) so TRACK
+  // samples slew via the existing ramp instead of stair-stepping.
+  if (i < 2 && positionActive[i] && enabled[i]) {
+    if (i == 0 && continuous(0) && isfinite(measured)) {
+      const float jump = wrapDelta180(target - positionTarget[0]);
+      const float err = wrapDelta180(target - measured);
+      const bool nearlyStopped = fabsf(measuredSpeed[0]) < panPositionBreakawaySpeedDegPerSec;
+      // Tune ±10/±90 from rest: re-arm spike. Live TRACK while moving: skip.
+      if (nearlyStopped && fabsf(jump) > panPositionBreakawayMinErrorDeg &&
+          fabsf(err) > panPositionBreakawayMinErrorDeg) {
+        armPanBreakaway(measured, target);
+      }
+    }
+    positionTarget[i] = target;
+    targetPulseUs[i] = uint32_t(lroundf(targetPulse));
+    return true;
+  }
+  const bool ramp = i == 0 ? panPositionRampEnabled : tiltPositionRampEnabled;
   const float initialAngle = ramp ? measured : target;
   const float initialPulse = continuous(i) ? float(neutralPulse(i)) : angularPositionPulse(i, initialAngle);
   if (!isfinite(initialPulse) || initialPulse < c.minPulseUs || initialPulse > c.maxPulseUs) {
@@ -77,21 +110,7 @@ bool applyPositionTarget(int i, float target, const char **error) {
   rampPulseUs[i] = initialPulse; targetPulseUs[i] = uint32_t(lroundf(targetPulse));
   positionSetpoint[i] = initialAngle; positionTarget[i] = target; positionActive[i] = true;
   positionBreakaway[i] = {};
-  if (continuous(i) && i == 0 && isfinite(measured)) {
-    float err = target - measured;
-    if (err > 180) err -= 360;
-    else if (err < -180) err += 360;
-    if (panPositionBreakawayOffsetUs > 0 && panPositionBreakawayDurationMs > 0 &&
-        fabsf(err) > panPositionBreakawayMinErrorDeg) {
-      const float blend = fmaxf(panPositionBreakawayMinScale, panPositionErrorBlend(fabsf(err)));
-      positionBreakaway[i].active = true;
-      positionBreakaway[i].sign = err > 0 ? 1 : -1;
-      positionBreakaway[i].startedUs = esp_timer_get_time();
-      positionBreakaway[i].startAngle = measured;
-      positionBreakaway[i].offsetUs = panPositionBreakawayOffsetUs * blend;
-      positionBreakaway[i].maxUs = uint64_t(panPositionBreakawayDurationMs * 1000.f * blend + .5f);
-    }
-  }
+  if (continuous(i) && i == 0) armPanBreakaway(measured, target);
   return true;
 }
 
@@ -246,8 +265,9 @@ void command(const char *line) {
         queueControlMessage("Track error: enable servos before TARGET"); return;
       }
       if (!trackHome.valid) { queueControlMessage("Track error: set TRACK HOME first"); return; }
+      // Allow slightly-below-site altitudes (angle-hold with negative elev).
       if (!isfinite(lat) || !isfinite(lon) || !isfinite(alt) || fabsf(lat) > 90.f || fabsf(lon) > 180.f ||
-          alt < 0.f || alt > 100000.f) {
+          alt < -5000.f || alt > 100000.f) {
         queueControlMessage("Track error: invalid TARGET lat lon alt"); return;
       }
       trackSearchStop();
@@ -495,14 +515,18 @@ void command(const char *line) {
   }
   if (!strncmp(line, "SERVO SCHEDULE ", 15)) {
     char axis[8] = {}; int end = 0;
-    float kpNear = NAN, capNear = NAN, scheduleDeg = NAN, brkMinScale = NAN, settleDeg = NAN;
-    const int fields = sscanf(line, "SERVO SCHEDULE %7s %f %f %f %f %f %n", axis, &kpNear, &capNear, &scheduleDeg, &brkMinScale, &settleDeg, &end);
-    if (strcmp(axis, "PAN") || fields != 6 || !end || line[end] ||
-        !validPanSchedule(kpNear, capNear, scheduleDeg, brkMinScale, settleDeg)) {
-      queueControlMessage("Servo error: expected SERVO SCHEDULE PAN kp_near cap_near schedule_deg brk_min_scale settle_deg"); return;
+    float kpNear = NAN, kiNear = NAN, kdNear = NAN, capNear = NAN;
+    float scheduleDeg = NAN, brkMinScale = NAN, settleDeg = NAN;
+    const int fields = sscanf(line, "SERVO SCHEDULE %7s %f %f %f %f %f %f %f %n",
+      axis, &kpNear, &kiNear, &kdNear, &capNear, &scheduleDeg, &brkMinScale, &settleDeg, &end);
+    if (strcmp(axis, "PAN") || fields != 8 || !end || line[end] ||
+        !validPanSchedule(kpNear, kiNear, kdNear, capNear, scheduleDeg, brkMinScale, settleDeg)) {
+      queueControlMessage("Servo error: expected SERVO SCHEDULE PAN kp_near ki_near kd_near cap_near schedule_deg brk_min_scale settle_deg"); return;
     }
     stopOutput(0);
     panPositionKpNear = kpNear;
+    panPositionKiNear = kiNear;
+    panPositionKdNear = kdNear;
     panPositionCapNearUs = capNear;
     panPositionScheduleDeg = scheduleDeg;
     panPositionBreakawayMinScale = brkMinScale;
@@ -518,6 +542,15 @@ void command(const char *line) {
     if (!strcmp(mode, "POT") || !strcmp(mode, "0")) next = PanPositionFeedback::Pot;
     else if (!strcmp(mode, "MAG") || !strcmp(mode, "1")) next = PanPositionFeedback::Mag;
     else { queueControlMessage("Servo error: feedback mode must be POT or MAG (FUSION not implemented)"); return; }
+    // Same mode: no-op. Re-asserting MAG on every TRACK HOME used to stopOutput +
+    // reset the mag filter, so the following TARGET failed on stale feedback and
+    // the PAN PID never armed.
+    if (next == panPositionFeedback) {
+      queueControlMessage(next == PanPositionFeedback::Mag
+        ? "Servo PAN feedback already MAG"
+        : "Servo PAN feedback already POT");
+      return;
+    }
     stopOutput(0);
     panPositionFeedback = next;
     panMagHeadingFilter.reset();

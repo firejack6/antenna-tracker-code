@@ -309,7 +309,7 @@ def run(
                 }
             )
         else:
-            az, el, rng, _ = bearing_range_el(
+            az, el, rng, _slant = bearing_range_el(
                 home_lat, home_lon, home_alt, ac["lat"], ac["lon"], ac["alt"]
             )
             az_mag = (az - decl + 360.0) % 360.0

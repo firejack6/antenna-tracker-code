@@ -20,6 +20,7 @@ TESTDATA = Path(__file__).resolve().parent / "testdata"
 FT_TO_M = 0.3048
 RADIO_FEED = Path(__file__).resolve().with_name("radio_feed.py")
 OPENSKY_FEED = Path(__file__).resolve().with_name("opensky_feed.py")
+ADSB_FEED = Path(__file__).resolve().with_name("adsb_feed.py")
 _ICAO_RE = re.compile(r"^[0-9a-fA-F]{6}$")
 
 
@@ -409,8 +410,9 @@ def bearing_range_el(home_lat, home_lon, home_alt, lat, lon, alt):
     az = (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
     dalt = alt - home_alt
     el = math.degrees(math.atan2(dalt, max(horiz, 1e-3)))
-    rng = math.hypot(horiz, dalt)
-    return az, el, rng, horiz
+    slant = math.hypot(horiz, dalt)
+    # Third value is ground range (map ray / TRACK plots). Slant is fourth.
+    return az, el, horiz, slant
 
 
 class TrackSim:
@@ -560,10 +562,9 @@ class TrackSim:
         if icao24:
             if not _ICAO_RE.match(icao24):
                 raise ValueError("icao24 must be 6 hex characters (e.g. a1b2c3)")
-            if not OPENSKY_FEED.is_file():
-                raise FileNotFoundError(f"opensky feed script missing: {OPENSKY_FEED}")
             # point=False → observe-only (poll UI/map, no TRACK TARGET / no HOME).
             point = bool(body.get("point", True))
+            source = str(body.get("source") or "opensky").strip().lower()
             if point:
                 # HOME + decl; relay also forces Mag PAN feedback (no pot ALIGN).
                 self.relay.command_track_home(
@@ -576,6 +577,72 @@ class TrackSim:
                 )
             interval = body.get("interval")
             idle_stop = body.get("idle_stop", 600)
+
+            if source == "adsb":
+                if not ADSB_FEED.is_file():
+                    raise FileNotFoundError(f"adsb feed script missing: {ADSB_FEED}")
+                adsb_source = str(body.get("adsb_source") or "json").strip().lower()
+                if adsb_source not in ("json", "sbs"):
+                    raise ValueError("adsb_source must be json or sbs")
+                cmd = [
+                    sys.executable,
+                    str(ADSB_FEED),
+                    icao24,
+                    "--relay",
+                    self._relay_base(),
+                    "--lat",
+                    str(home_lat),
+                    "--lon",
+                    str(home_lon),
+                    "--alt",
+                    str(home_alt),
+                    "--decl",
+                    str(decl),
+                    "--idle-stop",
+                    str(float(idle_stop) if idle_stop is not None else 600),
+                    "--source",
+                    adsb_source,
+                ]
+                if not point:
+                    cmd.append("--observe")
+                if interval is not None and str(interval) != "":
+                    cmd.extend(["--interval", str(float(interval))])
+                if adsb_source == "json":
+                    url = str(body.get("adsb_url") or "http://127.0.0.1:8080/data/aircraft.json").strip()
+                    cmd.extend(["--url", url])
+                else:
+                    host = str(body.get("adsb_host") or "127.0.0.1").strip() or "127.0.0.1"
+                    port = int(body.get("adsb_port") or 30003)
+                    cmd.extend(["--host", host, "--port", str(port)])
+                return self._spawn(
+                    cmd,
+                    ADSB_FEED.parent,
+                    "adsb-feed",
+                    {
+                        "active": True,
+                        "file": f"adsb:{icao24}",
+                        "icao24": icao24,
+                        "index": 0,
+                        "n": 0,
+                        "t": 0.0,
+                        "duration_s": 0.0,
+                        "lat": None,
+                        "lon": None,
+                        "alt": None,
+                        "az": None,
+                        "el": None,
+                        "range_m": None,
+                        "pan": None,
+                        "pointing": point,
+                        "message": (
+                            f"adsb-feed {icao24}"
+                            + (" · pointing" if point else " · observe")
+                        ),
+                    },
+                )
+
+            if not OPENSKY_FEED.is_file():
+                raise FileNotFoundError(f"opensky feed script missing: {OPENSKY_FEED}")
             cmd = [
                 sys.executable,
                 str(OPENSKY_FEED),

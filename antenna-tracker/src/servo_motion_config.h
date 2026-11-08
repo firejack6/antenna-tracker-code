@@ -10,7 +10,7 @@
 // velocity is noisy, especially across the 0°/360° seam.
 // Mag TRACK live bake Nov 7, 2026 (Tune page): low far Kp, higher near Kp,
 // schedule 60°, settle 14°, spike 90 µs / 30 ms, ramp off, speed 120 °/s.
-// SERVO PID kp/cap are the large-error (far) gains. Near gains + schedule
+// SERVO PID kp/ki/kd/cap are the large-error (far) gains. Near gains + schedule
 // are runtime (SERVO SCHEDULE PAN / Save PAN settings).
 //
 // Programmable position feedback source (SERVO FEEDBACK PAN / Save PAN).
@@ -27,11 +27,13 @@ extern PanMagHeadingFilter panMagHeadingFilter;
 // {kp, ki, kd, iLimit_us, cap_us, tolerance_deg} — far / large-error gains.
 constexpr PositionPidConfig panPositionPidDefaults = {.02f, .4f, 0, 30, 160, 2.f};
 constexpr float panPositionKpNearDefault = .04f;
+constexpr float panPositionKiNearDefault = .4f;
+constexpr float panPositionKdNearDefault = 0;
 constexpr float panPositionCapNearDefaultUs = 110;
 constexpr float panPositionScheduleDefaultDeg = 60; // |error| at which far gains are fully on
 constexpr float panPositionBreakawayMinScaleDefault = .5f;
 constexpr float panPositionSettleDefaultDeg = 14; // deadband ease-out band
-extern float panPositionKpNear, panPositionCapNearUs, panPositionScheduleDeg;
+extern float panPositionKpNear, panPositionKiNear, panPositionKdNear, panPositionCapNearUs, panPositionScheduleDeg;
 extern float panPositionBreakawayMinScale, panPositionSettleDeg;
 // Kick the CR servo past static friction before handing to position PID.
 // Offset/duration are runtime (SERVO BREAKAWAY PAN / Save PAN settings).
@@ -42,8 +44,11 @@ extern float panPositionBreakawayOffsetUs, panPositionBreakawayDurationMs;
 constexpr float panPositionBreakawayMinErrorDeg = 4;
 constexpr float panPositionBreakawayMoveDeg = .75f;
 constexpr float panPositionBreakawaySpeedDegPerSec = 6;
-inline bool validPanSchedule(float kpNear, float capNear, float scheduleDeg, float brkMinScale, float settleDeg) {
+inline bool validPanSchedule(float kpNear, float kiNear, float kdNear, float capNear,
+                             float scheduleDeg, float brkMinScale, float settleDeg) {
   return isfinite(kpNear) && kpNear >= 0 && kpNear <= 100 &&
+    isfinite(kiNear) && kiNear >= 0 && kiNear <= 100 &&
+    isfinite(kdNear) && kdNear >= 0 && kdNear <= 100 &&
     isfinite(capNear) && capNear >= 1 && capNear <= 1000 &&
     isfinite(scheduleDeg) && scheduleDeg >= 1 && scheduleDeg <= 180 &&
     isfinite(brkMinScale) && brkMinScale >= 0 && brkMinScale <= 1 &&

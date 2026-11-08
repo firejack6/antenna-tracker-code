@@ -26,6 +26,7 @@ from temperature_log import TemperatureLog
 from status_protocol import decode_status
 from track_sim import TrackSim, list_flights, list_sites, save_site
 from opensky_config import load_credentials, public_status, save_credentials
+from pan_tune_settings import public_status as pan_tune_settings_status, save_settings as save_pan_tune_settings
 
 ROOT = Path(__file__).resolve().parent
 # Cap /api/state sample backlog so a cold browser poll cannot download megabytes.
@@ -504,7 +505,8 @@ class Relay:
             elif gains == 'schedule':
                 if axis != 'PAN':
                     raise ValueError('Position schedule is PAN-only')
-                limits = [('kp_near', 0, 100), ('cap_near', 1, 1000), ('schedule_deg', 1, 180),
+                limits = [('kp_near', 0, 100), ('ki_near', 0, 100), ('kd_near', 0, 100),
+                          ('cap_near', 1, 1000), ('schedule_deg', 1, 180),
                           ('brk_min_scale', 0, 1), ('settle_deg', 1, 90)]
                 values = []
                 for key, lower, upper in limits:
@@ -596,8 +598,15 @@ class Relay:
         decl = float(data.get('decl', data.get('mag_declination', 0)) or 0)
         if not math.isfinite(decl) or abs(decl) > 360:
             raise ValueError('Track DECL out of range')
-        # Mag-only tracking: force Mag PAN feedback and never push pot ALIGN/INVERT.
-        self.command_servo_position({'axis': 'PAN', 'mode': 'MAG'}, gains='feedback')
+        # Mag-only tracking: ensure Mag PAN feedback and never push pot ALIGN/INVERT.
+        # Skip re-assert when already MAG — SERVO FEEDBACK used to stopOutput + reset
+        # the mag filter, which made the next TARGET fail to arm the PAN PID.
+        latest = self.telemetry if self.binary_active else (self.samples[-1] if self.samples else None)
+        cfg = (latest or {}).get('effective_config') or {}
+        pan_fb = cfg.get('pan_fb')
+        already_mag = pan_fb == 1 or pan_fb == '1' or str(pan_fb or '').upper() == 'MAG'
+        if not already_mag:
+            self.command_servo_position({'axis': 'PAN', 'mode': 'MAG'}, gains='feedback')
         self._queue_track_line(f'TRACK HOME {lat:g} {lon:g} {alt:g}\n')
         self._queue_track_line(f'TRACK DECL {decl:g}\n')
         return dict(ok=True, message='TRACK HOME/DECL queued (Mag feedback)')
@@ -606,7 +615,8 @@ class Relay:
         lat, lon, alt = data.get('lat'), data.get('lon'), data.get('alt')
         if type(lat) not in (int, float) or type(lon) not in (int, float) or type(alt) not in (int, float):
             raise ValueError('Track TARGET needs numeric lat lon alt')
-        if not all(math.isfinite(v) for v in (lat, lon, alt)) or abs(lat) > 90 or abs(lon) > 180 or not 0 <= alt <= 100000:
+        # Negative alt is valid for below-horizon / below-site angle hold.
+        if not all(math.isfinite(v) for v in (lat, lon, alt)) or abs(lat) > 90 or abs(lon) > 180 or not -5000 <= alt <= 100000:
             raise ValueError('Track TARGET lat/lon/alt out of range')
         self._queue_track_line(f'TRACK TARGET {lat:.8f} {lon:.8f} {alt:g}\n', require_armed=True)
         return dict(ok=True, lat=lat, lon=lon, alt=alt)
@@ -1369,6 +1379,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(dict(idle_s=idle, last_ui_at=self.server.relay.last_ui_at or None))
         if url.path == "/api/opensky-credentials":
             return self.reply(public_status())
+        if url.path == "/api/pan-tune-settings":
+            return self.reply(pan_tune_settings_status())
         if url.path == "/api/config":
             return self.reply(self.server.relay.effective_config())
         if url.path == '/api/adc-export':
@@ -1530,6 +1542,9 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     secret = None
                 self.reply(save_credentials(client_id, secret))
+            elif self.path == '/api/pan-tune-settings':
+                settings = data.get('settings', data)
+                self.reply(save_pan_tune_settings(settings if isinstance(settings, dict) else {}))
             elif self.path == '/api/track-site':
                 self.reply(save_site(data))
             elif self.path == '/api/track-home':

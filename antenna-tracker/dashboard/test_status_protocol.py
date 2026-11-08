@@ -5,7 +5,8 @@ import unittest
 import zlib
 from types import SimpleNamespace
 from status_protocol import (
-    MAGIC_STATUS, STATUS_SIZE, STATUS_SIZE_SCHEDULE, STATUS_SIZE_BREAKAWAY, STATUS_SIZE_LEGACY, decode_status)
+    MAGIC_STATUS, STATUS_SIZE, STATUS_SIZE_FEEDBACK, STATUS_SIZE_SCHEDULE,
+    STATUS_SIZE_BREAKAWAY, STATUS_SIZE_LEGACY, decode_status)
 from relay import Relay, Handler
 from adc_stream import Stream
 
@@ -22,13 +23,24 @@ class StatusProtocolTests(unittest.TestCase):
         self.assertEqual(frame['effective_config']['adc_stream'], 0)
         self.assertEqual(frame['effective_config']['pan_breakaway_us'], 0)
         self.assertEqual(frame['effective_config']['pan_kp_near'], 0)
+        self.assertEqual(frame['effective_config']['pan_ki_near'], 0)
+        self.assertEqual(frame['effective_config']['pan_kd_near'], 0)
         self.assertEqual(frame['effective_config']['pan_fb'], 0)
-        self.assertEqual(STATUS_SIZE, 964)
+        self.assertEqual(STATUS_SIZE, 972)
+        self.assertEqual(STATUS_SIZE_FEEDBACK, 964)
+
+    def test_feedback_payload_decodes_without_near_i_d(self):
+        frame = decode_status(bytes(STATUS_SIZE_FEEDBACK))
+        self.assertEqual(frame['effective_config']['pan_kp_near'], 0)
+        self.assertIsNone(frame['effective_config']['pan_ki_near'])
+        self.assertIsNone(frame['effective_config']['pan_kd_near'])
+        self.assertEqual(frame['effective_config']['pan_fb'], 0)
 
     def test_schedule_payload_decodes_without_pan_fb(self):
         self.assertEqual(STATUS_SIZE_SCHEDULE, 960)
         frame = decode_status(bytes(STATUS_SIZE_SCHEDULE))
         self.assertEqual(frame['effective_config']['pan_kp_near'], 0)
+        self.assertIsNone(frame['effective_config']['pan_ki_near'])
         self.assertIsNone(frame['effective_config']['pan_fb'])
 
     def test_breakaway_payload_decodes_without_schedule(self):

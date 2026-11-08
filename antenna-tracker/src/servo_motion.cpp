@@ -142,6 +142,19 @@ void updateServoMotion() {
       measuredDegrees[i] = fresh ? imu.angle[tiltImuAxis]-tiltImuZero : NAN;
       measuredSpeed[i] = fresh ? imu.speed[tiltImuAxis] : NAN;
     }
+    // Mag feedback selected: always publish filtered heading for PAN telemetry —
+    // not only while positionActive. After TRACK OFF / Stop, enabled is false and
+    // we used to leave pot degrees in motion.angle; the map red ray jumped in a
+    // different frame while the dish sat still.
+    if (i == 0 && panPositionFeedback == PanPositionFeedback::Mag) {
+      if (panMagHeadingFilter.fresh(now, servoFeedbackTimeoutUs)) {
+        measuredDegrees[0] = panMagHeadingFilter.heading;
+        measuredSpeed[0] = panMagHeadingFilter.speed;
+      } else {
+        measuredDegrees[0] = NAN;
+        measuredSpeed[0] = NAN;
+      }
+    }
     if (!enabled[i] || !armed || estopLatched) continue;
     // Absolute PWM sweep owns the pulse; closed-loop must not overwrite it.
     if (pwmSweep[i].active) continue;
@@ -278,8 +291,12 @@ void updateServoMotion() {
           const float absErr = fabsf(pidError);
           const float blend = panPositionErrorBlend(absErr);
           scheduled.kp = panPositionKpNear + (config.kp - panPositionKpNear) * blend;
+          scheduled.ki = panPositionKiNear + (config.ki - panPositionKiNear) * blend;
+          scheduled.kd = panPositionKdNear + (config.kd - panPositionKdNear) * blend;
           scheduled.outputLimit = panPositionCapNearUs + (config.outputLimit - panPositionCapNearUs) * blend;
           if (scheduled.kp < 0) scheduled.kp = 0;
+          if (scheduled.ki < 0) scheduled.ki = 0;
+          if (scheduled.kd < 0) scheduled.kd = 0;
           if (scheduled.outputLimit < 1) scheduled.outputLimit = 1;
           if (panPositionSettleDeg > 0 && absErr < panPositionSettleDeg) {
             const float dbBlend = fmaxf(.25f, absErr / panPositionSettleDeg);

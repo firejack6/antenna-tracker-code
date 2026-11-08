@@ -108,7 +108,7 @@ def run(
                 break
             time.sleep(min(remain, 0.05))
 
-        az, el, rng, _ = bearing_range_el(
+        az, el, rng, _slant = bearing_range_el(
             home_lat, home_lon, home_alt, p["lat"], p["lon"], p["alt"]
         )
         # Mag track frame: commanded pan = magnetic heading (true − decl).

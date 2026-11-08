@@ -106,6 +106,8 @@ void fillServoStatus(StatusFrame &frame) {
   frame.cfg_pan_breakaway_us = panPositionBreakawayOffsetUs;
   frame.cfg_pan_breakaway_ms = panPositionBreakawayDurationMs;
   frame.cfg_pan_kp_near = panPositionKpNear;
+  frame.cfg_pan_ki_near = panPositionKiNear;
+  frame.cfg_pan_kd_near = panPositionKdNear;
   frame.cfg_pan_cap_near = panPositionCapNearUs;
   frame.cfg_pan_schedule_deg = panPositionScheduleDeg;
   frame.cfg_pan_brk_min_scale = panPositionBreakawayMinScale;

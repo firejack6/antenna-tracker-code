@@ -102,7 +102,7 @@ def main():
     # so mid-slew commands stay above the physical ±60/80 µs breakaway.
     pid = dict(kp=3.2, ki=0.03, kd=0, ilimit=50, cap=220, tolerance=1.5)
     brk = dict(offset_us=230, duration_ms=55)
-    sch = dict(kp_near=1.4, cap_near=150, schedule_deg=50, brk_min_scale=0.7, settle_deg=5)
+    sch = dict(kp_near=1.4, ki_near=0.4, kd_near=0, cap_near=150, schedule_deg=50, brk_min_scale=0.7, settle_deg=5)
     apply_tune(pid, brk, sch)
 
     results = {}

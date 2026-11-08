@@ -14,8 +14,11 @@ _PAN = struct.Struct('<8f')
 _TILT = struct.Struct('<12f5i')
 _IMU = struct.Struct('<6f3iQ2I')
 _SENSORS = struct.Struct('<9f3ifQ')
-# 14f+4i + CR(6f) + breakaway(2f) + schedule(5f) + adc_hz(f) + stream(i) + wifi(i) + pan_fb(i)
-_CFG = struct.Struct('<14f4i14fiii')
+# 14f+4i + CR(6f) + breakaway(2f) + schedule(7f: kp/ki/kd/cap/span/brk/settle)
+# + adc_hz(f) + stream(i) + wifi(i) + pan_fb(i)
+_CFG = struct.Struct('<14f4i16fiii')
+# Pre–near-I/D firmware (schedule 5f + pan_fb).
+_CFG_FEEDBACK = struct.Struct('<14f4i14fiii')
 # Schedule generation without pan_fb (pre–mag-feedback firmware).
 _CFG_SCHEDULE = struct.Struct('<14f4i14fii')
 # Breakaway only (no schedule).
@@ -28,6 +31,7 @@ _PREFIX = (
     + _PAN.size + _TILT.size + _IMU.size + _SENSORS.size
 )
 STATUS_SIZE = _PREFIX + _CFG.size
+STATUS_SIZE_FEEDBACK = _PREFIX + _CFG_FEEDBACK.size
 STATUS_SIZE_SCHEDULE = _PREFIX + _CFG_SCHEDULE.size
 STATUS_SIZE_BREAKAWAY = _PREFIX + _CFG_BREAKAWAY.size
 STATUS_SIZE_LEGACY = _PREFIX + _CFG_LEGACY.size
@@ -41,7 +45,9 @@ def _finite(value):
 
 def decode_status(payload: bytes) -> dict:
     if len(payload) == STATUS_SIZE:
-        cfg_fmt, generation = _CFG, 'feedback'
+        cfg_fmt, generation = _CFG, 'near_pid'
+    elif len(payload) == STATUS_SIZE_FEEDBACK:
+        cfg_fmt, generation = _CFG_FEEDBACK, 'feedback'
     elif len(payload) == STATUS_SIZE_SCHEDULE:
         cfg_fmt, generation = _CFG_SCHEDULE, 'schedule'
     elif len(payload) == STATUS_SIZE_BREAKAWAY:
@@ -50,8 +56,8 @@ def decode_status(payload: bytes) -> dict:
         cfg_fmt, generation = _CFG_LEGACY, 'legacy'
     else:
         raise ValueError(
-            f'ATS1 size {len(payload)} != {STATUS_SIZE}, {STATUS_SIZE_SCHEDULE}, '
-            f'{STATUS_SIZE_BREAKAWAY}, or {STATUS_SIZE_LEGACY}')
+            f'ATS1 size {len(payload)} != {STATUS_SIZE}, {STATUS_SIZE_FEEDBACK}, '
+            f'{STATUS_SIZE_SCHEDULE}, {STATUS_SIZE_BREAKAWAY}, or {STATUS_SIZE_LEGACY}')
     offset = 0
 
     def take(fmt: struct.Struct):
@@ -132,7 +138,8 @@ def decode_status(payload: bytes) -> dict:
 
     cfg = take(cfg_fmt)
     pan_breakaway_us = pan_breakaway_ms = None
-    pan_kp_near = pan_cap_near = pan_schedule_deg = pan_brk_min_scale = pan_settle_deg = None
+    pan_kp_near = pan_ki_near = pan_kd_near = pan_cap_near = None
+    pan_schedule_deg = pan_brk_min_scale = pan_settle_deg = None
     pan_fb = None
     if generation == 'legacy':
         adc_sample_hz, adc_stream, wifi_ap = _finite(cfg[24]), cfg[25], cfg[26]
@@ -144,12 +151,19 @@ def decode_status(payload: bytes) -> dict:
         pan_kp_near, pan_cap_near = _finite(cfg[26]), _finite(cfg[27])
         pan_schedule_deg, pan_brk_min_scale, pan_settle_deg = _finite(cfg[28]), _finite(cfg[29]), _finite(cfg[30])
         adc_sample_hz, adc_stream, wifi_ap = _finite(cfg[31]), cfg[32], cfg[33]
-    else:
+    elif generation == 'feedback':
         pan_breakaway_us, pan_breakaway_ms = _finite(cfg[24]), _finite(cfg[25])
         pan_kp_near, pan_cap_near = _finite(cfg[26]), _finite(cfg[27])
         pan_schedule_deg, pan_brk_min_scale, pan_settle_deg = _finite(cfg[28]), _finite(cfg[29]), _finite(cfg[30])
         adc_sample_hz, adc_stream, wifi_ap = _finite(cfg[31]), cfg[32], cfg[33]
         pan_fb = cfg[34]
+    else:
+        pan_breakaway_us, pan_breakaway_ms = _finite(cfg[24]), _finite(cfg[25])
+        pan_kp_near, pan_ki_near, pan_kd_near = _finite(cfg[26]), _finite(cfg[27]), _finite(cfg[28])
+        pan_cap_near = _finite(cfg[29])
+        pan_schedule_deg, pan_brk_min_scale, pan_settle_deg = _finite(cfg[30]), _finite(cfg[31]), _finite(cfg[32])
+        adc_sample_hz, adc_stream, wifi_ap = _finite(cfg[33]), cfg[34], cfg[35]
+        pan_fb = cfg[36]
     effective_config = dict(
         pan_speed=_finite(cfg[0]), tilt_speed=_finite(cfg[1]),
         pan_ramp_rate=_finite(cfg[2]), tilt_ramp_rate=_finite(cfg[3]),
@@ -161,7 +175,8 @@ def decode_status(payload: bytes) -> dict:
         pan_ff=_finite(cfg[18]), pan_rise=_finite(cfg[19]), pan_fall=_finite(cfg[20]),
         pan_search=_finite(cfg[21]), pan_search_max=_finite(cfg[22]), pan_brake=_finite(cfg[23]),
         pan_breakaway_us=pan_breakaway_us, pan_breakaway_ms=pan_breakaway_ms,
-        pan_kp_near=pan_kp_near, pan_cap_near=pan_cap_near, pan_schedule_deg=pan_schedule_deg,
+        pan_kp_near=pan_kp_near, pan_ki_near=pan_ki_near, pan_kd_near=pan_kd_near,
+        pan_cap_near=pan_cap_near, pan_schedule_deg=pan_schedule_deg,
         pan_brk_min_scale=pan_brk_min_scale, pan_settle_deg=pan_settle_deg,
         pan_fb=pan_fb,
         adc_sample_hz=adc_sample_hz, adc_stream=adc_stream, wifi_ap=wifi_ap)

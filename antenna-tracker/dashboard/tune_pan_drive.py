@@ -53,7 +53,8 @@ def apply_tune(brk, brk_ms, kp, kp_near, schedule=55, cap=180, cap_near=120):
     api('servo-pid', {'axis': 'PAN', 'kp': kp, 'ki': 0, 'kd': 0, 'ilimit': 40, 'cap': cap, 'tolerance': 2})
     time.sleep(0.25)
     api('servo-schedule', {
-        'axis': 'PAN', 'kp_near': kp_near, 'cap_near': cap_near,
+        'axis': 'PAN', 'kp_near': kp_near, 'ki_near': 0.4, 'kd_near': 0,
+        'cap_near': cap_near,
         'schedule_deg': schedule, 'brk_min_scale': 0.5, 'settle_deg': 14,
     })
     time.sleep(0.7)

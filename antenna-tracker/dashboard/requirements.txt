@@ -1,6 +1,10 @@
 # Dashboard relay + USB serial (Wi‑Fi TCP needs no extra packages).
 pyserial==3.5
 
+# Local ADS-B (adsb_feed.py) uses stdlib only. On the dashboard host run dump1090
+# or readsb against a USB SDR (--net), then use the ADS-B tab (JSON or SBS TCP).
+# OpenSky remains optional via opensky_feed.py + opensky_credentials.json.
+
 # Optional: browser UI smoke tests (browser_*.py, check_map_tiles.py).
 #   python -m pip install playwright
 #   playwright install chromium

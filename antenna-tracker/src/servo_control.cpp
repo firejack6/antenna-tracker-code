@@ -41,6 +41,8 @@ PositionPidConfig tiltPositionPidConfig = tiltPositionPidDefaults;
 float panPositionBreakawayOffsetUs = panPositionBreakawayOffsetDefaultUs;
 float panPositionBreakawayDurationMs = panPositionBreakawayDurationDefaultMs;
 float panPositionKpNear = panPositionKpNearDefault;
+float panPositionKiNear = panPositionKiNearDefault;
+float panPositionKdNear = panPositionKdNearDefault;
 float panPositionCapNearUs = panPositionCapNearDefaultUs;
 float panPositionScheduleDeg = panPositionScheduleDefaultDeg;
 float panPositionBreakawayMinScale = panPositionBreakawayMinScaleDefault;
@@ -99,14 +101,15 @@ float speedLimit(int i) { return i == 0 ? panMaxSpeedDegPerSec : tiltMaxSpeedDeg
 float minAngle(int i) { return i == 0 ? panAngleAtMinPulseDeg : tiltAngleAtMinPulseDeg; }
 float maxAngle(int i) { return i == 0 ? panAngleAtMaxPulseDeg : tiltAngleAtMaxPulseDeg; }
 float positionLowerAngle(int i) {
-  if (i == 0) return panCalibration.amin;
+  // Mag TRACK closes on heading 0..360; pot amin/amax must not block it.
+  if (i == 0) return panPositionFeedback == PanPositionFeedback::Mag ? 0.f : panCalibration.amin;
   if (usesImu(i)) return fminf(tiltImuMinPulseAngle,tiltImuMaxPulseAngle);
   const auto c = getTiltCalibration();
   const float mapping = fminf(minAngle(i), maxAngle(i)) - (i == 1 ? c.zeroDeg : 0);
   return i == 1 ? (continuous(i) ? c.minAngleDeg : fmaxf(c.minAngleDeg, mapping)) : mapping;
 }
 float positionUpperAngle(int i) {
-  if (i == 0) return panCalibration.amax;
+  if (i == 0) return panPositionFeedback == PanPositionFeedback::Mag ? 360.f : panCalibration.amax;
   if (usesImu(i)) return fmaxf(tiltImuMinPulseAngle,tiltImuMaxPulseAngle);
   const auto c = getTiltCalibration();
   const float mapping = fmaxf(minAngle(i), maxAngle(i)) - (i == 1 ? c.zeroDeg : 0);

@@ -80,8 +80,8 @@ const panTune = (() => {
       <div class="tune-group">
         <h3>Far PID <button type="button" class="secondary" data-tune-apply="pid">Apply</button></h3>
         ${slider('kp', 'Far Kp', 0, 0.5, 0.005)}
-        ${slider('ki', 'Ki', 0, 1, 0.01)}
-        ${slider('kd', 'Kd', 0, 5, 0.05)}
+        ${slider('ki', 'Far Ki', 0, 1, 0.01)}
+        ${slider('kd', 'Far Kd', 0, 5, 0.05)}
         ${slider('ilimit', 'I limit (µs)', 0, 200, 1)}
         ${slider('cap', 'Far cap (µs)', 1, 250, 1)}
         ${slider('tolerance', 'Tolerance (°)', 0.1, 10, 0.1)}
@@ -89,6 +89,8 @@ const panTune = (() => {
       <div class="tune-group">
         <h3>Schedule / near <button type="button" class="secondary" data-tune-apply="schedule">Apply</button></h3>
         ${slider('kp_near', 'Near Kp', 0, 0.5, 0.005)}
+        ${slider('ki_near', 'Near Ki', 0, 1, 0.01)}
+        ${slider('kd_near', 'Near Kd', 0, 5, 0.05)}
         ${slider('cap_near', 'Near cap (µs)', 1, 250, 1)}
         ${slider('schedule_deg', 'Schedule span (°)', 1, 180, 1)}
         ${slider('brk_min_scale', 'Breakaway min scale', 0, 1, 0.05)}
@@ -244,6 +246,7 @@ const panTune = (() => {
     setStatus(fwMag()
       ? 'Firmware Mag position ON — PAN PID closes on heading. Save PAN to persist.'
       : 'Firmware Mag position OFF — PAN PID closes on pot. Save PAN to persist.');
+    try { await persistGuiSettings(); } catch { /* snapshot is best-effort */ }
     paint();
   }
 
@@ -292,9 +295,31 @@ const panTune = (() => {
     return null;
   }
 
-  async function forceStop(reason, { auto = false } = {}) {
+  async function stopMotion({ note = null } = {}) {
     stopMagCorrector();
     clearSettleWatch();
+    if (settleStopBusy) return;
+    settleStopBusy = true;
+    try {
+      await api('servo', { axis: 'PAN', off: true });
+      if (note) setStatus(note);
+    } catch (error) {
+      setStatus(note ? `${note} · OFF failed: ${error.message}` : error.message);
+      try { await api('servo', { axis: 'PAN', off: true }); } catch { /* second try */ }
+    } finally {
+      settleStopBusy = false;
+    }
+  }
+
+  function haltTrackSession({ silent = false } = {}) {
+    // Same path as Track Stop — clear hold/feeds so Start isn't stuck on Holding….
+    if (typeof deviceMap !== 'undefined' && typeof deviceMap.stopTrackingUi === 'function') {
+      return !!deviceMap.stopTrackingUi({ silent, panOff: false });
+    }
+    return false;
+  }
+
+  async function forceStop(reason, { auto = false } = {}) {
     const text = auto ? `AUTO-STOP (5s rule) · ${reason}` : reason;
     setStatus(text);
     const statusEl = el('tune-status');
@@ -302,16 +327,8 @@ const panTune = (() => {
       statusEl.classList.add('tune-auto-stop');
       setTimeout(() => statusEl.classList.remove('tune-auto-stop'), 8000);
     }
-    if (settleStopBusy) return;
-    settleStopBusy = true;
-    try {
-      await api('servo', { axis: 'PAN', off: true });
-    } catch (error) {
-      setStatus(`${text} · OFF failed: ${error.message}`);
-      try { await api('servo', { axis: 'PAN', off: true }); } catch { /* second try */ }
-    } finally {
-      settleStopBusy = false;
-    }
+    haltTrackSession({ silent: true });
+    await stopMotion();
   }
 
   function evaluateSettleWatch() {
@@ -791,9 +808,11 @@ const panTune = (() => {
     return window.dashboard?.samples?.() || [];
   }
 
-  function syncPair(key, value) {
+  function syncPair(key, value, { force = false } = {}) {
+    if (!force && dirtySettings.has(key)) return;
     const range = panel.querySelector(`[data-tune="${key}"]`);
     const num = panel.querySelector(`[data-tune-num="${key}"]`);
+    if (range && (range === document.activeElement || num === document.activeElement) && !force) return;
     if (range && Number.isFinite(value)) range.value = value;
     if (num && Number.isFinite(value)) num.value = Number(value.toPrecision(6));
   }
@@ -802,8 +821,184 @@ const panTune = (() => {
     return panel.querySelector(`[data-tune-num="${key}"]`)?.valueAsNumber;
   }
 
+  const SETTINGS_KEYS = [
+    'kp', 'ki', 'kd', 'ilimit', 'cap', 'tolerance',
+    'kp_near', 'ki_near', 'kd_near', 'cap_near', 'schedule_deg', 'brk_min_scale', 'settle_deg',
+    'offset_us', 'duration_ms', 'dbplus', 'dbminus',
+    'ramp_rate', 'speed',
+  ];
+  let settingsPromptSession = null;
+  let settingsPromptBusy = false;
+  let settingsHoldGui = false; // freeze slider sync while connect prompt is open
+  // Keys the user edited in the GUI; don't clobber from telemetry until Apply.
+  const dirtySettings = new Set();
+
+  function markSettingDirty(key) {
+    if (key) dirtySettings.add(key);
+  }
+
+  function clearDirtySettings(keys) {
+    if (!keys) dirtySettings.clear();
+    else for (const key of keys) dirtySettings.delete(key);
+  }
+
+  function editingTuneControls() {
+    const active = document.activeElement;
+    return !!(active && (active.closest?.('.tune-controls') || active.closest?.('.tune-panel')));
+  }
+
+  function collectSettings() {
+    const out = {};
+    for (const key of SETTINGS_KEYS) {
+      const v = readNum(key);
+      if (Number.isFinite(v)) out[key] = v;
+    }
+    out.ramp_enabled = !!el('tune-ramp-enabled')?.checked;
+    const fb = (fwFeedback || boardPanFb || '').toUpperCase();
+    if (fb === 'MAG' || fb === 'POT') out.pan_fb = fb;
+    return out;
+  }
+
+  function firmwareSettings(sample) {
+    if (!sample) return null;
+    const pos = sample.servo_position?.PAN || {};
+    const cfg = sample.effective_config || {};
+    const motion = sample.servo_motion?.PAN || {};
+    const out = {};
+    const map = {
+      kp: pos.kp ?? cfg.pan_kp,
+      ki: pos.ki ?? cfg.pan_ki,
+      kd: pos.kd ?? cfg.pan_kd,
+      ilimit: pos.ilimit,
+      cap: pos.cap,
+      tolerance: pos.tolerance,
+      dbplus: pos.dbplus ?? cfg.pan_dbplus,
+      dbminus: pos.dbminus ?? cfg.pan_dbminus,
+      offset_us: cfg.pan_breakaway_us,
+      duration_ms: cfg.pan_breakaway_ms,
+      kp_near: cfg.pan_kp_near,
+      ki_near: cfg.pan_ki_near,
+      kd_near: cfg.pan_kd_near,
+      cap_near: cfg.pan_cap_near,
+      schedule_deg: cfg.pan_schedule_deg,
+      brk_min_scale: cfg.pan_brk_min_scale,
+      settle_deg: cfg.pan_settle_deg,
+      ramp_rate: pos.ramprate ?? cfg.pan_ramp_rate,
+      speed: motion.limit ?? cfg.pan_speed,
+    };
+    for (const [key, value] of Object.entries(map)) {
+      if (Number.isFinite(value)) out[key] = value;
+    }
+    if (pos.ramp != null || cfg.pan_ramp != null) {
+      out.ramp_enabled = !!(pos.ramp === 1 || cfg.pan_ramp === 1);
+    }
+    if (cfg.pan_fb === 1 || cfg.pan_fb === '1' || cfg.pan_fb === 'MAG') out.pan_fb = 'MAG';
+    else if (cfg.pan_fb === 0 || cfg.pan_fb === '0' || cfg.pan_fb === 'POT') out.pan_fb = 'POT';
+    // Need core PID + schedule + breakaway before comparing — avoid false prompts mid-boot.
+    const required = ['kp', 'ki', 'cap', 'kp_near', 'schedule_deg', 'offset_us', 'dbplus', 'dbminus'];
+    if (!required.every(k => Number.isFinite(out[k]))) return null;
+    return out;
+  }
+
+  function settingsDiffer(saved, firmware) {
+    if (!saved || !firmware) return { differ: false, diffs: [] };
+    const diffs = [];
+    const eps = (a, b) => Math.abs(a - b) > 1e-4 + 1e-4 * Math.max(Math.abs(a), Math.abs(b));
+    for (const key of SETTINGS_KEYS) {
+      if (!Number.isFinite(saved[key]) || !Number.isFinite(firmware[key])) continue;
+      if (eps(saved[key], firmware[key])) {
+        diffs.push(`${key}: GUI ${saved[key]} → board ${firmware[key]}`);
+      }
+    }
+    if (typeof saved.ramp_enabled === 'boolean' && typeof firmware.ramp_enabled === 'boolean'
+        && saved.ramp_enabled !== firmware.ramp_enabled) {
+      diffs.push(`ramp_enabled: GUI ${saved.ramp_enabled} → board ${firmware.ramp_enabled}`);
+    }
+    if (saved.pan_fb && firmware.pan_fb && saved.pan_fb !== firmware.pan_fb) {
+      diffs.push(`pan_fb: GUI ${saved.pan_fb} → board ${firmware.pan_fb}`);
+    }
+    return { differ: diffs.length > 0, diffs };
+  }
+
+  function applySettingsToGui(settings) {
+    if (!settings) return;
+    for (const key of SETTINGS_KEYS) {
+      if (Number.isFinite(settings[key])) syncPair(key, settings[key], { force: true });
+    }
+    const rampBox = el('tune-ramp-enabled');
+    if (rampBox && typeof settings.ramp_enabled === 'boolean') rampBox.checked = settings.ramp_enabled;
+    clearDirtySettings();
+  }
+
+  async function persistGuiSettings(note) {
+    const settings = collectSettings();
+    if (!Object.keys(settings).length) return null;
+    const body = await api('pan-tune-settings', { settings });
+    if (note) setStatus(note);
+    return body;
+  }
+
+  async function uploadSavedSettings(settings) {
+    applySettingsToGui(settings);
+    const quiet = { persist: false, quiet: true };
+    await apply('pid', quiet);
+    await apply('schedule', quiet);
+    await apply('breakaway', quiet);
+    await apply('deadband', quiet);
+    await apply('ramp', quiet);
+    await apply('speed', quiet);
+    if (settings.pan_fb === 'MAG' || settings.pan_fb === 'POT') {
+      await api('servo-feedback', { axis: 'PAN', mode: settings.pan_fb });
+      fwFeedback = settings.pan_fb;
+      refreshScaleLabel();
+      applyMagLegend();
+    }
+    await api('pan', { action: 'save' });
+    await persistGuiSettings();
+    setStatus('Uploaded last GUI PAN settings to board and saved to NVS + pan_tune_settings.json.');
+  }
+
+  async function maybePromptSavedSettings(sample) {
+    const state = window.dashboard?.state?.();
+    if (!state || state.status !== 'connected') {
+      settingsPromptSession = null;
+      settingsHoldGui = false;
+      return;
+    }
+    const session = state.session;
+    if (session == null || session === settingsPromptSession || settingsPromptBusy) return;
+    const firmware = firmwareSettings(sample);
+    if (!firmware) return;
+    settingsPromptBusy = true;
+    settingsHoldGui = true;
+    try {
+      const response = await fetch('/api/pan-tune-settings', { cache: 'no-store' });
+      const body = await response.json().catch(() => ({}));
+      const saved = body.settings;
+      if (!saved) {
+        settingsPromptSession = session;
+        return;
+      }
+      const { differ, diffs } = settingsDiffer(saved, firmware);
+      settingsPromptSession = session;
+      if (!differ) return;
+      const preview = diffs.slice(0, 8).join('\n') + (diffs.length > 8 ? `\n… +${diffs.length - 8} more` : '');
+      const ok = window.confirm(
+        `Last GUI PAN settings differ from firmware.\n\n${preview}\n\nUpload saved settings to the board (and Save PAN)?`
+      );
+      if (ok) await uploadSavedSettings(saved);
+      else applySettingsToGui(firmware);
+    } catch (error) {
+      setStatus(`Settings check failed: ${error.message}`);
+      settingsPromptSession = session;
+    } finally {
+      settingsPromptBusy = false;
+      settingsHoldGui = false;
+    }
+  }
+
   function pullFromTelemetry(sample) {
-    if (!sample) return;
+    if (!sample || settingsHoldGui || settingsPromptBusy) return;
     const pos = sample.servo_position?.PAN || {};
     const cfg = sample.effective_config || {};
     const motion = sample.servo_motion?.PAN || {};
@@ -838,6 +1033,8 @@ const panTune = (() => {
     syncPair('offset_us', cfg.pan_breakaway_us);
     syncPair('duration_ms', cfg.pan_breakaway_ms);
     syncPair('kp_near', cfg.pan_kp_near);
+    syncPair('ki_near', cfg.pan_ki_near);
+    syncPair('kd_near', cfg.pan_kd_near);
     syncPair('cap_near', cfg.pan_cap_near);
     syncPair('schedule_deg', cfg.pan_schedule_deg);
     syncPair('brk_min_scale', cfg.pan_brk_min_scale);
@@ -845,7 +1042,7 @@ const panTune = (() => {
     syncPair('ramp_rate', pos.ramprate ?? cfg.pan_ramp_rate);
     syncPair('speed', motion.limit ?? cfg.pan_speed);
     const rampBox = el('tune-ramp-enabled');
-    if (rampBox && document.activeElement !== rampBox) {
+    if (rampBox && document.activeElement !== rampBox && !dirtySettings.has('ramp_enabled')) {
       const rampOn = pos.ramp === 1 || cfg.pan_ramp === 1;
       if (pos.ramp != null || cfg.pan_ramp != null) rampBox.checked = !!rampOn;
     }
@@ -1179,54 +1376,83 @@ const panTune = (() => {
     await goRelative(90, { rawPot: true, characterize: true });
   }
 
-  async function apply(kind) {
+  async function apply(kind, { persist = true, quiet = false } = {}) {
+    // Gain/schedule/DB/ramp edits stop PWM on the board — also clear Track hold so
+    // Start isn't stuck disabled and resume is just Update aim / Restart hold
+    // (servos stay armed; no re-Enable needed).
+    const stopsOutput = kind === 'pid' || kind === 'schedule' || kind === 'breakaway'
+      || kind === 'deadband' || kind === 'ramp';
+    const clearedTrack = stopsOutput ? haltTrackSession({ silent: true }) : false;
+    const resumeHint = clearedTrack
+      ? ' Tracking cleared — Update aim / Restart hold (servos still armed).'
+      : '';
+
     if (kind === 'pid') {
       await api('servo-pid', {
         axis: 'PAN',
         kp: readNum('kp'), ki: readNum('ki'), kd: readNum('kd'),
         ilimit: readNum('ilimit'), cap: readNum('cap'), tolerance: readNum('tolerance'),
       });
-      setStatus('Far PID applied (output stopped). Save PAN to persist.');
+      clearDirtySettings(['kp', 'ki', 'kd', 'ilimit', 'cap', 'tolerance']);
+      if (!quiet) setStatus(`Far PID applied (output stopped).${resumeHint} Save PAN to persist.`);
     } else if (kind === 'schedule') {
       await api('servo-schedule', {
         axis: 'PAN',
-        kp_near: readNum('kp_near'), cap_near: readNum('cap_near'),
+        kp_near: readNum('kp_near'), ki_near: readNum('ki_near'), kd_near: readNum('kd_near'),
+        cap_near: readNum('cap_near'),
         schedule_deg: readNum('schedule_deg'), brk_min_scale: readNum('brk_min_scale'),
         settle_deg: readNum('settle_deg'),
       });
-      setStatus('Schedule applied (output stopped). Save PAN to persist.');
+      clearDirtySettings(['kp_near', 'ki_near', 'kd_near', 'cap_near', 'schedule_deg', 'brk_min_scale', 'settle_deg']);
+      if (!quiet) setStatus(`Schedule applied (output stopped).${resumeHint} Save PAN to persist.`);
     } else if (kind === 'breakaway') {
       await api('servo-breakaway', {
         axis: 'PAN', offset_us: readNum('offset_us'), duration_ms: readNum('duration_ms'),
       });
-      setStatus('Breakaway applied (output stopped). Save PAN to persist.');
+      clearDirtySettings(['offset_us', 'duration_ms']);
+      if (!quiet) setStatus(`Breakaway applied (output stopped).${resumeHint} Save PAN to persist.`);
     } else if (kind === 'deadband') {
       await api('servo-deadband', {
         axis: 'PAN', dbplus: readNum('dbplus'), dbminus: readNum('dbminus'),
       });
-      setStatus('Deadband applied (output stopped). Save PAN to persist.');
+      clearDirtySettings(['dbplus', 'dbminus']);
+      if (!quiet) setStatus(`Deadband applied (output stopped).${resumeHint} Save PAN to persist.`);
     } else if (kind === 'ramp') {
       await api('servo-ramp', {
         axis: 'PAN',
         enabled: el('tune-ramp-enabled').checked,
         rate: readNum('ramp_rate'),
       });
-      setStatus(`Ramp ${el('tune-ramp-enabled').checked ? 'enabled' : 'disabled'} @ ${readNum('ramp_rate')} °/s (output stopped).`);
+      clearDirtySettings(['ramp_rate', 'ramp_enabled']);
+      if (!quiet) {
+        setStatus(
+          `Ramp ${el('tune-ramp-enabled').checked ? 'enabled' : 'disabled'} @ ${readNum('ramp_rate')} °/s (output stopped).${resumeHint}`
+        );
+      }
     } else if (kind === 'speed') {
       await api('servo-speed', { axis: 'PAN', speed: readNum('speed') });
-      setStatus(`Speed limit ${readNum('speed')} °/s queued.`);
+      clearDirtySettings(['speed']);
+      if (!quiet) setStatus(`Speed limit ${readNum('speed')} °/s queued.`);
+    }
+    if (persist) {
+      try { await persistGuiSettings(); } catch { /* snapshot is best-effort */ }
     }
   }
 
-  // Sync range ↔ number inputs
+  // Sync range ↔ number inputs; mark dirty so telemetry cannot wipe mid-edit.
   panel.querySelectorAll('[data-tune]').forEach(range => {
     const key = range.dataset.tune;
     const num = panel.querySelector(`[data-tune-num="${key}"]`);
-    range.addEventListener('input', () => { if (num) num.value = range.value; });
+    range.addEventListener('input', () => {
+      markSettingDirty(key);
+      if (num) num.value = range.value;
+    });
     num?.addEventListener('input', () => {
+      markSettingDirty(key);
       if (Number.isFinite(num.valueAsNumber)) range.value = num.valueAsNumber;
     });
   });
+  el('tune-ramp-enabled')?.addEventListener('change', () => markSettingDirty('ramp_enabled'));
 
   refreshScaleLabel();
   el('tune-mag-mode').addEventListener('click', async () => {
@@ -1409,13 +1635,12 @@ const panTune = (() => {
       ? `Auto-stop ON · STOP at 5s if |err|>${SETTLE_AUTO_STOP_DEG}° in 3–5s window`
       : 'Auto-stop OFF · moves will not be cut off by the 5s rule');
   });
-  el('tune-stop').addEventListener('click', async () => {
-    try {
-      stopMagCorrector();
-      clearSettleWatch();
-      await api('servo', { axis: 'PAN', off: true });
-      setStatus(handCal ? 'PAN OFF (still in hand cal).' : 'PAN OFF · mag corrector stopped.');
-    } catch (error) { setStatus(error.message); }
+  el('tune-stop').addEventListener('click', () => {
+    // Identical to Track Stop: TRACK OFF + clear hold/feeds + PAN OFF.
+    haltTrackSession({ silent: true });
+    stopMotion({
+      note: handCal ? 'Stopped (still in hand cal).' : 'Stopped — same as Track Stop · tracking + PAN OFF.',
+    });
   });
   el('tune-align').addEventListener('click', () => {
     try {
@@ -1433,7 +1658,6 @@ const panTune = (() => {
       const next = {
         lat: Number.isFinite(saved.lat) ? saved.lat : 0,
         lon: Number.isFinite(saved.lon) ? saved.lon : 0,
-        length: Number.isFinite(saved.length) ? saved.length : 1000,
         panInvert: invert,
         magDeclination: decl,
         panAlign,
@@ -1444,7 +1668,6 @@ const panTune = (() => {
         ['device-mag-declination', next.magDeclination],
         ['device-latitude', next.lat],
         ['device-longitude', next.lon],
-        ['device-ray-length', next.length],
       ]) {
         const input = document.getElementById(id);
         if (input && Number.isFinite(value)) input.value = value;
@@ -1468,7 +1691,8 @@ const panTune = (() => {
   el('tune-save').addEventListener('click', async () => {
     try {
       await api('pan', { action: 'save' });
-      setStatus('PAN settings save queued (NVS).');
+      await persistGuiSettings();
+      setStatus('PAN settings save queued (NVS) · GUI snapshot → pan_tune_settings.json.');
     } catch (error) { setStatus(error.message); }
   });
   panel.querySelectorAll('[data-tune-apply]').forEach(button => {
@@ -1539,11 +1763,13 @@ const panTune = (() => {
         pruneHist(magPotHist, t);
         pruneHist(magTargetHist, t);
       }
-      if (visible && sample && document.activeElement?.closest?.('.tune-controls') == null) {
+      if (visible && sample && !editingTuneControls() && dirtySettings.size === 0) {
         // Refresh slider reported values when not editing.
+        // Re-check focus/dirty inside the timer — a pending pull used to wipe mid-type.
         if (!statusTimer) {
           statusTimer = setTimeout(() => {
             statusTimer = null;
+            if (editingTuneControls() || dirtySettings.size > 0 || settingsHoldGui) return;
             pullFromTelemetry(latest());
           }, 400);
         }
@@ -1552,8 +1778,10 @@ const panTune = (() => {
       checkSettleWatch(sample);
       watchFirmwarePositionEnd(sample);
       if (handCal) updateHandReadout();
+      maybePromptSavedSettings(sample);
       if (visible) paint();
     },
     paint,
+    stopMotion,
   };
 })();

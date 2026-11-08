@@ -56,7 +56,8 @@ struct StatusFrame {
   int32_t cfg_pan_ramp, cfg_tilt_ramp, cfg_pan_osfault, cfg_tilt_osfault;
   float cfg_pan_ff, cfg_pan_rise, cfg_pan_fall, cfg_pan_search, cfg_pan_search_max, cfg_pan_brake;
   float cfg_pan_breakaway_us, cfg_pan_breakaway_ms;
-  float cfg_pan_kp_near, cfg_pan_cap_near, cfg_pan_schedule_deg, cfg_pan_brk_min_scale, cfg_pan_settle_deg;
+  float cfg_pan_kp_near, cfg_pan_ki_near, cfg_pan_kd_near, cfg_pan_cap_near;
+  float cfg_pan_schedule_deg, cfg_pan_brk_min_scale, cfg_pan_settle_deg;
   float cfg_adc_sample_hz;
   int32_t cfg_adc_stream; // 1 = ATB2 on TCP, 0 = lean (status only)
   int32_t cfg_wifi_ap;
@@ -64,7 +65,7 @@ struct StatusFrame {
 };
 #pragma pack(pop)
 
-static_assert(sizeof(StatusFrame) == 964, "StatusFrame must match dashboard status_protocol.STATUS_SIZE");
+static_assert(sizeof(StatusFrame) == 972, "StatusFrame must match dashboard status_protocol.STATUS_SIZE");
 
 bool sendStatusFrame(const StatusFrame &frame);
 void fillServoStatus(StatusFrame &frame); // Safety, servos, motion, PID, position, calibrations, effective config.
