@@ -11,3 +11,10 @@ dashboard/recordings/
 dashboard/health-logs/
 dashboard/opensky_credentials.json
 dashboard/testdata/sites.json
+dashboard/servo-tuning*.json
+dashboard/servo-raw-characterization*.json
+dashboard/pan-sensor-characterization*.json
+dashboard/tilt-sensor-characterization*.json
+dashboard/tilt-imu-*.json
+dashboard/tilt-before-*.json
+dashboard/tcp-dropout-validation.json
