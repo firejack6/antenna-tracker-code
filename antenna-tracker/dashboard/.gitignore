@@ -1,0 +1,6 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+opensky_credentials.json
+testdata/sites.json

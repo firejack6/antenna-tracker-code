@@ -4,6 +4,8 @@
 .vscode/launch.json
 .vscode/ipch
 __pycache__/
+dashboard/venv/
+dashboard/.venv/
 dashboard/preview.png
 dashboard/recordings/
 dashboard/health-logs/

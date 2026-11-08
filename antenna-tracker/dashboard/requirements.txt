@@ -1,1 +1,7 @@
+# Dashboard relay + USB serial (Wi‑Fi TCP needs no extra packages).
 pyserial==3.5
+
+# Optional: browser UI smoke tests (browser_*.py, check_map_tiles.py).
+#   python -m pip install playwright
+#   playwright install chromium
+# playwright>=1.40
