@@ -7,9 +7,10 @@
 // tuning in NVS. PAN neutral/polarity/pot mapping defaults: pan_calibration.h.
 // Continuous PAN position (map go-to / track). Output is PWM µs from neutral;
 // P must clear the ~60/80 µs breakaway deadband near the target. No D — pot
-// velocity is noisy, especially across the 0°/360° seam. Live Oct 25 retune:
-// 90° wrap settle ~2 s with ramp off + 120 °/s limit.
-// SERVO PID kp/cap are the large-error (≈180°) gains. Near gains + schedule
+// velocity is noisy, especially across the 0°/360° seam.
+// Mag TRACK live bake Nov 7, 2026 (Tune page): low far Kp, higher near Kp,
+// schedule 60°, settle 14°, spike 90 µs / 30 ms, ramp off, speed 120 °/s.
+// SERVO PID kp/cap are the large-error (far) gains. Near gains + schedule
 // are runtime (SERVO SCHEDULE PAN / Save PAN settings).
 //
 // Programmable position feedback source (SERVO FEEDBACK PAN / Save PAN).
@@ -23,19 +24,20 @@ inline bool validPanPositionFeedback(int value) {
 extern PanPositionFeedback panPositionFeedback;
 extern PanMagSoftIron panMagSoftIron;
 extern PanMagHeadingFilter panMagHeadingFilter;
-constexpr PositionPidConfig panPositionPidDefaults = {3.f, .02f, 0, 40, 200, 1.5f};
-constexpr float panPositionKpNearDefault = .9f;
-constexpr float panPositionCapNearDefaultUs = 100;
+// {kp, ki, kd, iLimit_us, cap_us, tolerance_deg} — far / large-error gains.
+constexpr PositionPidConfig panPositionPidDefaults = {.02f, .4f, 0, 30, 160, 2.f};
+constexpr float panPositionKpNearDefault = .04f;
+constexpr float panPositionCapNearDefaultUs = 110;
 constexpr float panPositionScheduleDefaultDeg = 60; // |error| at which far gains are fully on
-constexpr float panPositionBreakawayMinScaleDefault = .45f;
-constexpr float panPositionSettleDefaultDeg = 12; // deadband ease-out band
+constexpr float panPositionBreakawayMinScaleDefault = .5f;
+constexpr float panPositionSettleDefaultDeg = 14; // deadband ease-out band
 extern float panPositionKpNear, panPositionCapNearUs, panPositionScheduleDeg;
 extern float panPositionBreakawayMinScale, panPositionSettleDeg;
 // Kick the CR servo past static friction before handing to position PID.
 // Offset/duration are runtime (SERVO BREAKAWAY PAN / Save PAN settings).
 // Applied spike scales with command |error| (floor at minScale).
-constexpr float panPositionBreakawayOffsetDefaultUs = 200;
-constexpr float panPositionBreakawayDurationDefaultMs = 40;
+constexpr float panPositionBreakawayOffsetDefaultUs = 90;
+constexpr float panPositionBreakawayDurationDefaultMs = 30;
 extern float panPositionBreakawayOffsetUs, panPositionBreakawayDurationMs;
 constexpr float panPositionBreakawayMinErrorDeg = 4;
 constexpr float panPositionBreakawayMoveDeg = .75f;
