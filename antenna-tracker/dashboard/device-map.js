@@ -1990,6 +1990,28 @@ const deviceMap = (() => {
     if (el('track-adsb-sbs') && savedAdsbSbs) el('track-adsb-sbs').value = savedAdsbSbs;
     if (el('track-adsb-poll')) el('track-adsb-poll').checked = false;
     syncAdsbSourceUi();
+    // Prefer setup_env.py → local_defaults.json when the browser has no saved host yet.
+    fetch('/api/local-defaults', { cache: 'no-store' }).then(async (response) => {
+      if (!response.ok) return;
+      const body = await response.json().catch(() => ({}));
+      if (!body || !body.ok) return;
+      try {
+        if (el('track-adsb-host') && body.adsb_host && !localStorage.getItem('track-adsb-host')) {
+          el('track-adsb-host').value = String(body.adsb_host);
+        }
+        if (el('track-adsb-port') && Number.isFinite(Number(body.adsb_port)) && !localStorage.getItem('track-adsb-port')) {
+          el('track-adsb-port').value = String(body.adsb_port);
+        }
+        if (el('track-adsb-interval') && Number.isFinite(Number(body.adsb_poll_interval))
+            && localStorage.getItem('track-adsb-interval') == null) {
+          el('track-adsb-interval').value = String(body.adsb_poll_interval);
+        }
+        if (el('opensky-client-id') && body.opensky_client_id
+            && (!el('opensky-client-id').value || el('opensky-client-id').value === 'your-opensky-client-id')) {
+          el('opensky-client-id').value = String(body.opensky_client_id);
+        }
+      } catch { /* ignore */ }
+    }).catch(() => {});
     const savedSource = localStorage.getItem('track-source');
     const savedHoldAz = parseFloat(localStorage.getItem('track-hold-az'));
     const savedHoldEl = parseFloat(localStorage.getItem('track-hold-el'));

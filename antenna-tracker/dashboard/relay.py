@@ -1381,6 +1381,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(public_status())
         if url.path == "/api/pan-tune-settings":
             return self.reply(pan_tune_settings_status())
+        if url.path == "/api/local-defaults":
+            # Written by setup_env.py from .env (gitignored). No secrets here.
+            path = Path(__file__).resolve().parent / "local_defaults.json"
+            if not path.is_file():
+                return self.reply({"ok": False, "exists": False})
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                return self.reply({"ok": False, "exists": True, "error": str(exc)}, 400)
+            if not isinstance(raw, dict):
+                return self.reply({"ok": False, "exists": True, "error": "invalid local_defaults.json"}, 400)
+            return self.reply({"ok": True, "exists": True, **raw})
         if url.path == "/api/config":
             return self.reply(self.server.relay.effective_config())
         if url.path == '/api/adc-export':

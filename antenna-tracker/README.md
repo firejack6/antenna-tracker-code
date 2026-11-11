@@ -18,6 +18,9 @@ not for dashboard telemetry.
 
 `GET /api/config` returns the latest board `effective_config` from ATS1 plus these source notes.
 
+0. One-time local secrets: from `antenna-tracker/` run `python setup_env.py`
+   (writes gitignored `.env` and applies Wi-Fi / OpenSky / site / ADS-B defaults).
+   Or copy `.env.example` → `.env` and run `python setup_env.py --apply`.
 1. Upload the firmware to the Nano ESP32.
 2. Start `start-dashboard.ps1`; it asks Windows to join **antenna-tracker** using
    the name/password in `src/network_config.h`, then opens the dashboard.
