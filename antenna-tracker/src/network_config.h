@@ -10,6 +10,6 @@ constexpr bool WIFI_AP_20MHZ = true;
 constexpr uint8_t WIFI_AP_ADDRESS[4] = {192, 168, 20, 1};
 constexpr uint8_t WIFI_AP_NETMASK[4] = {255, 255, 255, 0};
 constexpr char WIFI_SSID[] = "antenna-tracker";
-constexpr char WIFI_PASSWORD[] = "changeme123"; // At least 8 characters for hotspot.
+constexpr char WIFI_PASSWORD[] = "changeme123"; // Set a private hotspot password (≥8 chars) before use.
 constexpr uint16_t TELEMETRY_TCP_PORT = 9000;
 constexpr uint32_t TCP_NO_PROGRESS_TIMEOUT_MS = 5000; // Keep temporary stalls connected.

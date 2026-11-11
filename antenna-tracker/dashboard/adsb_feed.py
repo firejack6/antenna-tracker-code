@@ -79,23 +79,51 @@ def _alt_m(ac: dict) -> float | None:
     return None
 
 
+def _lat_lon(ac: dict) -> tuple[float, float] | None:
+    """Prefer live lat/lon; fall back to dump1090/readsb lastPosition."""
+    lat, lon = ac.get("lat"), ac.get("lon")
+    if _finite(lat, lon):
+        return float(lat), float(lon)
+    last = ac.get("lastPosition") or ac.get("last_position")
+    if isinstance(last, dict):
+        lat, lon = last.get("lat"), last.get("lon")
+        if _finite(lat, lon):
+            return float(lat), float(lon)
+    return None
+
+
+def _norm_icao(value: str) -> str:
+    h = str(value or "").strip().lower()
+    if h.startswith("0x"):
+        h = h[2:]
+    return h
+
+
 def fetch_json(url: str, icao24: str) -> dict | None:
     req = urllib.request.Request(url, headers={"Accept": "application/json"}, method="GET")
     with urllib.request.urlopen(req, timeout=3.0) as resp:
         payload = json.loads(resp.read().decode("utf-8", errors="replace"))
     aircraft = payload.get("aircraft") or payload.get("ac") or []
-    want = icao24.lower()
+    want = _norm_icao(icao24)
     for ac in aircraft:
-        hex_id = str(ac.get("hex") or ac.get("icao") or ac.get("icao24") or "").lower()
+        hex_id = _norm_icao(ac.get("hex") or ac.get("icao") or ac.get("icao24") or "")
         if hex_id != want:
             continue
-        lat, lon = ac.get("lat"), ac.get("lon")
-        if not _finite(lat, lon):
+        pos = _lat_lon(ac)
+        if not pos:
             return None
+        lat, lon = pos
         alt = _alt_m(ac)
         if alt is None:
             alt = 0.0
         cs = str(ac.get("flight") or ac.get("callsign") or hex_id).strip() or hex_id
+        last = ac.get("lastPosition") or ac.get("last_position") or {}
+        seen_pos = None
+        if isinstance(last, dict) and isinstance(last.get("seen_pos"), (int, float)):
+            seen_pos = float(last["seen_pos"])
+        seen = ac.get("seen")
+        if not isinstance(seen, (int, float)):
+            seen = seen_pos
         return {
             "icao24": want,
             "callsign": cs,
@@ -104,7 +132,9 @@ def fetch_json(url: str, icao24: str) -> dict | None:
             "alt": float(alt),
             "on_ground": bool(ac.get("ground") or ac.get("on_ground") or False),
             "track": float(ac["track"]) if isinstance(ac.get("track"), (int, float)) else None,
-            "seen": ac.get("seen") or ac.get("seen_pos"),
+            "seen": seen,
+            "seen_pos": seen_pos,
+            "from_last_position": not _finite(ac.get("lat"), ac.get("lon")),
         }
     return None
 
@@ -383,6 +413,12 @@ def run(
                         "message": (
                             f"adsb {ac['callsign']} {ac['lat']:.5f},{ac['lon']:.5f}"
                             f" · {ac['alt']:.0f} m · az {az:.0f}° el {el:.0f}°"
+                            + (" · lastPosition" if ac.get("from_last_position") else "")
+                            + (
+                                f" · seen_pos {ac['seen_pos']:.0f}s"
+                                if isinstance(ac.get("seen_pos"), (int, float))
+                                else ""
+                            )
                             + (" · observe" if not pointing else " · TRACK")
                             + (f" · {message}" if message else "")
                         ),
@@ -405,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lon", type=float, required=True)
     parser.add_argument("--alt", type=float, default=0.0)
     parser.add_argument("--decl", type=float, default=0.0)
-    parser.add_argument("--interval", type=float, default=1.0, help="Poll period seconds")
+    parser.add_argument("--interval", type=float, default=0.5, help="Poll period seconds (0.5 = 2 Hz)")
     parser.add_argument("--idle-stop", type=float, default=600.0)
     parser.add_argument("--observe", action="store_true")
     parser.add_argument("--source", choices=("json", "sbs"), default="json")

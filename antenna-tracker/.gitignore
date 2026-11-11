@@ -10,6 +10,8 @@ dashboard/preview.png
 dashboard/recordings/
 dashboard/health-logs/
 dashboard/opensky_credentials.json
+dashboard/opensky_credentials*.json
+!dashboard/opensky_credentials.example.json
 dashboard/pan_tune_settings.json
 dashboard/testdata/sites.json
 dashboard/servo-tuning*.json

@@ -21,8 +21,9 @@ not for dashboard telemetry.
 1. Upload the firmware to the Nano ESP32.
 2. Start `start-dashboard.ps1`; it asks Windows to join **antenna-tracker** using
    the name/password in `src/network_config.h`, then opens the dashboard.
-3. If Windows rejects the Wi-Fi request, join the hotspot manually (password
-   **changeme123**). The launcher prints the Windows error and still starts.
+3. If Windows rejects the Wi-Fi request, join the hotspot manually using the
+   password you set in `src/network_config.h` (`WIFI_PASSWORD`). The launcher
+   prints the Windows error and still starts.
 4. Select **Wi-Fi TCP**, enter **192.168.20.1:9000**, then Connect.
 
 Edit `src/network_config.h` for the Wi-Fi name/password, TCP port and network

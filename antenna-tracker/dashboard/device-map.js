@@ -39,19 +39,20 @@ const deviceMap = (() => {
         <button type="button" role="tab" data-track-source="playback" aria-selected="false">Playback</button>
       </nav>
       <div class="track-source-panel track-ops" data-track-source-panel="adsb">
-        <label class="track-ops-field" title="6-hex ICAO24 / Mode S address">ICAO24<input id="track-adsb-icao" type="text" maxlength="6" placeholder="a1b2c3" autocomplete="off" spellcheck="false"></label>
-        <label class="track-ops-field" title="Local decoder on this PC (USB SDR → dump1090/readsb)">Source<select id="track-adsb-source"><option value="json">dump1090 JSON</option><option value="sbs">SBS TCP</option></select></label>
-        <label class="track-ops-field" id="track-adsb-url-wrap" title="dump1090/readsb aircraft.json">JSON URL<input id="track-adsb-url" type="text" value="http://127.0.0.1:8080/data/aircraft.json" spellcheck="false"></label>
+        <label class="track-ops-field" title="6-hex ICAO24 / Mode S address">ICAO24<input id="track-adsb-icao" type="text" maxlength="6" placeholder="0d10fe" autocomplete="off" spellcheck="false"></label>
+        <label class="track-ops-field" title="Local dump1090/readsb on the LAN (aircraft.json) or SBS TCP">Source<select id="track-adsb-source"><option value="json">Local JSON (IP)</option><option value="sbs">SBS TCP</option></select></label>
+        <label class="track-ops-field" id="track-adsb-host-wrap" title="dump1090/readsb host — polls http://IP:port/data/aircraft.json">Host IP<input id="track-adsb-host" type="text" value="127.0.0.1" placeholder="127.0.0.1" spellcheck="false" autocomplete="off"></label>
+        <label class="track-ops-field" id="track-adsb-port-wrap" title="HTTP port for aircraft.json (usually 8080)">Port<input id="track-adsb-port" type="number" min="1" max="65535" step="1" value="8080" aria-label="ADS-B JSON HTTP port"></label>
         <label class="track-ops-field" id="track-adsb-sbs-wrap" hidden title="BaseStation TCP from dump1090 --net">SBS host:port<input id="track-adsb-sbs" type="text" value="127.0.0.1:30003" spellcheck="false"></label>
-        <label class="track-ops-field track-ops-poll" title="Poll local ADS-B decoder (USB SDR on this PC). Independent of Start tracking.">
+        <label class="track-ops-field track-ops-poll" title="Poll local ADS-B decoder. Independent of Start tracking. 0.5 s = 2 Hz.">
           ADS-B poll
           <span class="track-poll-row">
             <input id="track-adsb-poll" type="checkbox">
-            <input id="track-adsb-interval" type="number" min="0.25" max="30" step="0.25" value="1" aria-label="ADS-B poll interval seconds">
+            <input id="track-adsb-interval" type="number" min="0.25" max="30" step="0.25" value="0.5" aria-label="ADS-B poll interval seconds">
             <span class="track-poll-unit">s</span>
           </span>
         </label>
-        <p class="plot-note track-source-hint">USB SDR → dump1090/readsb on this host. Poll = watch. Start tracking = TRACK TARGET + point.</p>
+        <p class="plot-note track-source-hint">Local dump1090/readsb → http://IP:8080/data/aircraft.json (uses lat/lon or lastPosition). Poll = watch @ 2 Hz default. Start tracking = TRACK TARGET + point.</p>
         <div class="track-feed-log-wrap">
           <div class="track-feed-log-head">
             <strong>Feed log</strong>
@@ -754,7 +755,7 @@ const deviceMap = (() => {
     });
     try { localStorage.setItem('track-source', source); } catch { /* ignore */ }
     const hints = {
-      adsb: 'ADS-B: USB SDR → dump1090/readsb on this PC. Poll = watch. Start tracking = point.',
+      adsb: 'ADS-B: local dump1090/readsb by IP. Poll = watch. Start tracking = point.',
       opensky: 'OpenSky: Poll = watch positions. Start tracking = feed TRACK TARGET and point (servos on).',
       angles: 'Angle hold: set az / el / range → Update aim (TRACK TARGET hold).',
       playback: 'Playback: pick a flight CSV, enable servos, Start.',
@@ -764,8 +765,17 @@ const deviceMap = (() => {
   }
   function syncAdsbSourceUi() {
     const mode = el('track-adsb-source')?.value || 'json';
-    if (el('track-adsb-url-wrap')) el('track-adsb-url-wrap').hidden = mode !== 'json';
+    const json = mode === 'json';
+    if (el('track-adsb-host-wrap')) el('track-adsb-host-wrap').hidden = !json;
+    if (el('track-adsb-port-wrap')) el('track-adsb-port-wrap').hidden = !json;
     if (el('track-adsb-sbs-wrap')) el('track-adsb-sbs-wrap').hidden = mode !== 'sbs';
+  }
+  function adsbJsonUrl(host, port) {
+    const h = String(host || '').trim();
+    const p = Number(port);
+    if (!h) throw Error('ADS-B host IP required (e.g. 127.0.0.1).');
+    if (!Number.isFinite(p) || p < 1 || p > 65535) throw Error('ADS-B port must be 1–65535.');
+    return `http://${h}:${p}/data/aircraft.json`;
   }
   let openskyPollSyncing = false;
   function syncOpenskyPollUi(on) {
@@ -904,9 +914,10 @@ const deviceMap = (() => {
       if (!m) throw Error('SBS host:port required (e.g. 127.0.0.1:30003).');
       return { icao24, interval, adsbSource, host: m[1], port: Number(m[2]) };
     }
-    const url = (el('track-adsb-url')?.value || '').trim();
-    if (!/^https?:\/\//i.test(url)) throw Error('ADS-B JSON URL must start with http:// or https://');
-    return { icao24, interval, adsbSource, url };
+    const host = (el('track-adsb-host')?.value || '127.0.0.1').trim();
+    const port = el('track-adsb-port')?.valueAsNumber;
+    const url = adsbJsonUrl(host, Number.isFinite(port) ? port : 8080);
+    return { icao24, interval, adsbSource, host, port: Number.isFinite(port) ? port : 8080, url };
   }
   async function startAdsbFeed({ point = false, clearTrail = true } = {}) {
     const params = adsbParams();
@@ -939,8 +950,13 @@ const deviceMap = (() => {
       localStorage.setItem('track-adsb-icao', params.icao24);
       localStorage.setItem('track-adsb-interval', String(params.interval));
       localStorage.setItem('track-adsb-source', params.adsbSource);
-      if (params.url) localStorage.setItem('track-adsb-url', params.url);
-      if (params.host) localStorage.setItem('track-adsb-sbs', `${params.host}:${params.port}`);
+      if (params.adsbSource === 'json') {
+        localStorage.setItem('track-adsb-host', params.host);
+        localStorage.setItem('track-adsb-port', String(params.port));
+        localStorage.setItem('track-adsb-url', params.url);
+      } else if (params.host) {
+        localStorage.setItem('track-adsb-sbs', `${params.host}:${params.port}`);
+      }
     } catch { /* ignore */ }
     const payload = {
       action: 'start',
@@ -1955,8 +1971,21 @@ const deviceMap = (() => {
     if (el('track-adsb-source') && (savedAdsbSource === 'json' || savedAdsbSource === 'sbs')) {
       el('track-adsb-source').value = savedAdsbSource;
     }
-    const savedAdsbUrl = localStorage.getItem('track-adsb-url');
-    if (el('track-adsb-url') && savedAdsbUrl) el('track-adsb-url').value = savedAdsbUrl;
+    let savedAdsbHost = (localStorage.getItem('track-adsb-host') || '').trim();
+    let savedAdsbPort = parseFloat(localStorage.getItem('track-adsb-port'));
+    // Migrate older full-URL saves → host/port fields.
+    if (!savedAdsbHost) {
+      const legacyUrl = localStorage.getItem('track-adsb-url') || '';
+      const m = legacyUrl.match(/^https?:\/\/([^/:]+)(?::(\d+))?/i);
+      if (m) {
+        savedAdsbHost = m[1];
+        if (!Number.isFinite(savedAdsbPort) && m[2]) savedAdsbPort = Number(m[2]);
+      }
+    }
+    if (el('track-adsb-host')) el('track-adsb-host').value = savedAdsbHost || '127.0.0.1';
+    if (el('track-adsb-port')) {
+      el('track-adsb-port').value = String(Number.isFinite(savedAdsbPort) ? savedAdsbPort : 8080);
+    }
     const savedAdsbSbs = localStorage.getItem('track-adsb-sbs');
     if (el('track-adsb-sbs') && savedAdsbSbs) el('track-adsb-sbs').value = savedAdsbSbs;
     if (el('track-adsb-poll')) el('track-adsb-poll').checked = false;
@@ -2098,19 +2127,27 @@ const deviceMap = (() => {
       });
     }
   });
-  ['track-adsb-url', 'track-adsb-sbs'].forEach(id => {
-    el(id)?.addEventListener('change', () => {
-      try {
-        if (id === 'track-adsb-url') localStorage.setItem('track-adsb-url', el(id).value || '');
-        else localStorage.setItem('track-adsb-sbs', el(id).value || '');
-      } catch { /* ignore */ }
-      if (el('track-adsb-poll')?.checked) {
-        startAdsbFeed({ point: adsbPointing, clearTrail: false }).catch(error => {
-          stopAdsbPoll({ note: `error: ${error.message}` });
-          setStatus(error.message);
-        });
-      }
+  function restartAdsbIfPolling() {
+    if (!el('track-adsb-poll')?.checked) return;
+    startAdsbFeed({ point: adsbPointing, clearTrail: false }).catch(error => {
+      stopAdsbPoll({ note: `error: ${error.message}` });
+      setStatus(error.message);
     });
+  }
+  el('track-adsb-host')?.addEventListener('change', () => {
+    try { localStorage.setItem('track-adsb-host', (el('track-adsb-host').value || '').trim()); } catch { /* ignore */ }
+    restartAdsbIfPolling();
+  });
+  el('track-adsb-port')?.addEventListener('change', () => {
+    const p = el('track-adsb-port').valueAsNumber;
+    try {
+      if (Number.isFinite(p)) localStorage.setItem('track-adsb-port', String(p));
+    } catch { /* ignore */ }
+    restartAdsbIfPolling();
+  });
+  el('track-adsb-sbs')?.addEventListener('change', () => {
+    try { localStorage.setItem('track-adsb-sbs', el('track-adsb-sbs').value || ''); } catch { /* ignore */ }
+    restartAdsbIfPolling();
   });
   el('track-opensky-log-clear')?.addEventListener('click', () => {
     const log = el('track-opensky-log');
