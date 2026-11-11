@@ -17,8 +17,13 @@ dashboard/pan_tune_settings.json
 dashboard/testdata/sites.json
 dashboard/servo-tuning*.json
 dashboard/servo-raw-characterization*.json
+dashboard/servo-incident-state.json
+dashboard/servo-success-state.json
+dashboard/servo-noise-cap-live.json
 dashboard/pan-sensor-characterization*.json
 dashboard/tilt-sensor-characterization*.json
 dashboard/tilt-imu-*.json
 dashboard/tilt-before-*.json
 dashboard/tcp-dropout-validation.json
+dashboard/testdata/GPS Data - Boo*
+dashboard/testdata/GPS Data - Sus*
