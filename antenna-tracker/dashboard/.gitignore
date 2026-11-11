@@ -22,5 +22,3 @@ tilt-imu-*.json
 tilt-before-*.json
 tcp-dropout-validation.json
 # Real flight logs with ground-station GPS (keep local only)
-testdata/GPS Data - Boo*
-testdata/GPS Data - Sus*

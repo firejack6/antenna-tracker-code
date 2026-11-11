@@ -1,0 +1,8 @@
+{
+  "id": "boo-sus-gs",
+  "label": "Boo/Sus antenna (fake, 500 ft from launch)",
+  "lat": 31.0411306,
+  "lon": -103.5223,
+  "alt": 0,
+  "notes": "Synthetic antenna site 152.4 m (500 ft) south of launch pad (31.0425, -103.5223). Real GS coordinates removed from the public tree."
+}

@@ -25,5 +25,3 @@ dashboard/tilt-sensor-characterization*.json
 dashboard/tilt-imu-*.json
 dashboard/tilt-before-*.json
 dashboard/tcp-dropout-validation.json
-dashboard/testdata/GPS Data - Boo*
-dashboard/testdata/GPS Data - Sus*
